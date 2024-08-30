@@ -17,6 +17,7 @@
 
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/Bridging/ASTGen.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/Initializer.h"
@@ -39,6 +40,120 @@ using namespace ast_scope;
 
 #pragma mark ASTScope
 
+class RecordedLookupName {
+private:
+  SourceFile *sourceFile;
+  
+public:
+  Identifier name;
+  SourceLoc sourceLoc;
+  
+  RecordedLookupName(SourceFile *sf, Identifier n, SourceLoc sl) : sourceFile(sf), name(n), sourceLoc(sl) {}
+  
+  void print(raw_ostream &os) const {
+    os << "Matching name: ";
+    os << name;
+    os << " at: ";
+    sourceLoc.printLineAndColumn(os, sourceFile->getASTContext().SourceMgr);
+    llvm::outs() << "\n";
+  }
+};
+
+class LoggingASTScopeDeclConsumer: public namelookup::AbstractASTScopeDeclConsumer {
+private:
+  SourceFile *sourceFile;
+  namelookup::AbstractASTScopeDeclConsumer *originalConsumer;
+  
+public:
+  SmallVector<RecordedLookupName*> recordedElements;
+  
+  BridgedArrayRef getBridgedLocatedIdentifierArrayRef() {
+    SmallVector<BridgedLocatedIdentifier> result;
+    
+    for (auto recordedElement : recordedElements) {
+      result.push_back(BridgedLocatedIdentifier(recordedElement->name, recordedElement->sourceLoc));
+    }
+    
+    return BridgedArrayRef(result.data(), result.size());
+  }
+  
+  LoggingASTScopeDeclConsumer(SourceFile *SF, namelookup::AbstractASTScopeDeclConsumer *consumer) : sourceFile(SF), originalConsumer(consumer) {}
+
+  ~LoggingASTScopeDeclConsumer() = default;
+
+  /// Called for every ValueDecl visible from the lookup.
+  ///
+  /// Takes an array in order to batch the consumption before setting
+  /// IndexOfFirstOuterResult when necessary.
+  ///
+  /// \param baseDC either a type context or the local context of a
+  /// `self` parameter declaration. See LookupResult for a discussion
+  /// of type -vs- instance lookup results.
+  ///
+  /// \return true if the lookup should be stopped at this point.
+  bool consume(ArrayRef<ValueDecl *> values,
+               NullablePtr<DeclContext> baseDC = nullptr) override {
+    for (auto value : values) {
+//      llvm::outs() << "Matching name: ";
+//      value->print(llvm::outs());
+//      llvm::outs() << " at: ";
+//      value->getLoc().printLineAndColumn(llvm::outs(), sourceFile->getASTContext().SourceMgr);
+//      llvm::outs() << "\n";
+      
+      recordedElements.push_back(new RecordedLookupName(sourceFile, value->getBaseIdentifier(), value->getLoc()));
+    }
+    
+    return originalConsumer->consume(values, baseDC);
+  };
+
+  /// Look for members of a nominal type or extension scope.
+  ///
+  /// \return true if the lookup should be stopped at this point.
+  bool lookInMembers(const DeclContext *scopeDC) const override {
+//    llvm::outs() << "Lookup in members of: ";
+//    scopeDC->printContext(llvm::outs());
+//    llvm::outs() << "\n";
+    
+    return originalConsumer->lookInMembers(scopeDC);
+  };
+
+  /// Called for local VarDecls that might not yet be in scope.
+  ///
+  /// Note that the set of VarDecls visited here are going to be a
+  /// superset of those visited in consume().
+  bool consumePossiblyNotInScope(ArrayRef<VarDecl *> values) override {
+//    for (auto value : values) {
+//      llvm::outs() << "Possibly not in scope: ";
+//      value->print(llvm::outs());
+//      llvm::outs() << " at: ";
+//      value->getLoc().printLineAndColumn(llvm::outs(), sourceFile->getASTContext().SourceMgr);
+//      llvm::outs() << "\n";
+//    }
+    
+    return originalConsumer->consumePossiblyNotInScope(values);
+  }
+
+  /// Called right before looking at the parent scope of a BraceStmt.
+  ///
+  /// \return true if the lookup should be stopped at this point.
+  bool
+  finishLookupInBraceStmt(BraceStmt *stmt) override {
+    return originalConsumer->finishLookupInBraceStmt(stmt);
+  }
+
+#ifndef NDEBUG
+  void startingNextLookupStep() override {
+    originalConsumer->startingNextLookupStep();
+  }
+  void finishingLookup(std::string input) const override {
+    originalConsumer->finishingLookup(input);
+  }
+  bool isTargetLookup() const override {
+    return originalConsumer->isTargetLookup();
+  }
+#endif
+};
+
 void ASTScope::unqualifiedLookup(
     SourceFile *SF, SourceLoc loc,
     namelookup::AbstractASTScopeDeclConsumer &consumer) {
@@ -48,7 +163,22 @@ void ASTScope::unqualifiedLookup(
 
   if (auto *s = SF->getASTContext().Stats)
     ++s->getFrontendCounters().NumASTScopeLookups;
-  ASTScopeImpl::unqualifiedLookup(SF, loc, consumer);
+  
+  llvm::outs() << "-------> Lookup started at: ";
+  loc.printLineAndColumn(llvm::outs(), SF->getASTContext().SourceMgr);
+  llvm::outs() << "\n";
+  
+  LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = *new LoggingASTScopeDeclConsumer(SF, &consumer);
+  
+  ASTScopeImpl::unqualifiedLookup(SF, loc, loggingASTScopeDeclConsumer);
+  
+  for (RecordedLookupName *recordedElement : loggingASTScopeDeclConsumer.recordedElements) {
+    recordedElement->print(llvm::outs());
+  }
+  
+  swift_ASTGen_validateUnqualifiedLookup(SF->getExportedSourceFile(), loc, loggingASTScopeDeclConsumer.getBridgedLocatedIdentifierArrayRef());
+  
+  llvm::outs() << "\n";
 }
 
 llvm::SmallVector<LabeledStmt *, 4> ASTScope::lookupLabeledStmts(

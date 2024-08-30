@@ -29,6 +29,7 @@ add_pure_swift_host_library(swiftASTGen STATIC
   Sources/ASTGen/Exprs.swift
   Sources/ASTGen/Generics.swift
   Sources/ASTGen/LegacyParse.swift
+  Sources/ASTGen/LexicalLookup.swift
   Sources/ASTGen/Literals.swift
   Sources/ASTGen/Macros.swift
   Sources/ASTGen/ParameterClause.swift
@@ -46,6 +47,7 @@ add_pure_swift_host_library(swiftASTGen STATIC
   SWIFT_DEPENDENCIES
     _CompilerSwiftSyntax
     _CompilerSwiftIfConfig
+    _CompilerSwiftLexicalLookup
     _CompilerSwiftOperators
     _CompilerSwiftSyntaxBuilder
     _CompilerSwiftParser

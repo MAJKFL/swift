@@ -75,6 +75,10 @@ struct BridgedLocatedIdentifier {
 
   SWIFT_NAME("nameLoc")
   BridgedSourceLoc NameLoc;
+  
+#ifdef USED_IN_CPP_SOURCE
+  BridgedLocatedIdentifier(swift::Identifier name, swift::SourceLoc sourceLoc) : Name(BridgedIdentifier(name)), NameLoc(BridgedSourceLoc(sourceLoc)) {}
+#endif
 };
 
 class BridgedDeclBaseName {

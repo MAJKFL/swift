@@ -625,6 +625,8 @@ void UnqualifiedLookupFactory::lookInASTScopes() {
   stopForDebuggingIfStartingTargetLookup(true);
 #endif
 
+  llvm::outs() << "lookInASTScopes\n";
+  
   ASTScope::unqualifiedLookup(DC->getParentSourceFile(), Loc, consumer);
 }
 
@@ -929,6 +931,11 @@ void ASTScope::lookupLocalDecls(SourceFile *sf, DeclName name, SourceLoc loc,
                                 SmallVectorImpl<ValueDecl *> &results) {
   ASTScopeDeclConsumerForLocalLookup consumer(name, stopAfterInnermostBraceStmt,
                                               results);
+  llvm::outs() << "lookupLocalDecls\n";
+  llvm::outs() << "name: ";
+  name.print(llvm::outs());
+  llvm::outs() << "\n";
+  llvm::outs() << "stopAfterInnermostBraceStmt: " << stopAfterInnermostBraceStmt << "\n";
   ASTScope::unqualifiedLookup(sf, loc, consumer);
 }
 
