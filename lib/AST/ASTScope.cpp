@@ -40,44 +40,14 @@ using namespace ast_scope;
 
 #pragma mark ASTScope
 
-class RecordedLookupName {
-private:
-  SourceFile *sourceFile;
-  
-public:
-  Identifier name;
-  SourceLoc sourceLoc;
-  
-  RecordedLookupName(SourceFile *sf, Identifier n, SourceLoc sl) : sourceFile(sf), name(n), sourceLoc(sl) {}
-  
-  void print(raw_ostream &os) const {
-    os << "Matching name: ";
-    os << name;
-    os << " at: ";
-    sourceLoc.printLineAndColumn(os, sourceFile->getASTContext().SourceMgr);
-    llvm::outs() << "\n";
-  }
-};
-
 class LoggingASTScopeDeclConsumer: public namelookup::AbstractASTScopeDeclConsumer {
 private:
-  SourceFile *sourceFile;
   namelookup::AbstractASTScopeDeclConsumer *originalConsumer;
   
 public:
-  SmallVector<RecordedLookupName*> recordedElements;
+  SmallVector<BridgedLocatedIdentifier> recordedElements;
   
-  BridgedArrayRef getBridgedLocatedIdentifierArrayRef() {
-    SmallVector<BridgedLocatedIdentifier> result;
-    
-    for (auto recordedElement : recordedElements) {
-      result.push_back(BridgedLocatedIdentifier(recordedElement->name, recordedElement->sourceLoc));
-    }
-    
-    return BridgedArrayRef(result.data(), result.size());
-  }
-  
-  LoggingASTScopeDeclConsumer(SourceFile *SF, namelookup::AbstractASTScopeDeclConsumer *consumer) : sourceFile(SF), originalConsumer(consumer) {}
+  LoggingASTScopeDeclConsumer(namelookup::AbstractASTScopeDeclConsumer *consumer) : originalConsumer(consumer) {}
 
   ~LoggingASTScopeDeclConsumer() = default;
 
@@ -100,11 +70,19 @@ public:
 //      value->getLoc().printLineAndColumn(llvm::outs(), sourceFile->getASTContext().SourceMgr);
 //      llvm::outs() << "\n";
       
-      recordedElements.push_back(new RecordedLookupName(sourceFile, value->getBaseIdentifier(), value->getLoc()));
+      recordedElements.push_back(*new BridgedLocatedIdentifier(value->getBaseIdentifier(), value->getLoc()));
     }
     
     return originalConsumer->consume(values, baseDC);
   };
+  
+  static void printBridgedLocatedIdentifier(BridgedLocatedIdentifier *locatedIdentifier, SourceFile *sourceFile, raw_ostream &os) {
+    os << "Matching name: ";
+    os << locatedIdentifier->Name.unbridged();
+    os << " at: ";
+    locatedIdentifier->NameLoc.unbridged().printLineAndColumn(os, sourceFile->getASTContext().SourceMgr);
+    llvm::outs() << "\n";
+  }
 
   /// Look for members of a nominal type or extension scope.
   ///
@@ -168,15 +146,14 @@ void ASTScope::unqualifiedLookup(
   loc.printLineAndColumn(llvm::outs(), SF->getASTContext().SourceMgr);
   llvm::outs() << "\n";
   
-  LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = *new LoggingASTScopeDeclConsumer(SF, &consumer);
+  LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = *new LoggingASTScopeDeclConsumer(&consumer);
   
   ASTScopeImpl::unqualifiedLookup(SF, loc, loggingASTScopeDeclConsumer);
   
-  for (RecordedLookupName *recordedElement : loggingASTScopeDeclConsumer.recordedElements) {
-    recordedElement->print(llvm::outs());
-  }
-  
-  swift_ASTGen_validateUnqualifiedLookup(SF->getExportedSourceFile(), loc, loggingASTScopeDeclConsumer.getBridgedLocatedIdentifierArrayRef());
+  swift_ASTGen_validateUnqualifiedLookup(SF->getExportedSourceFile(),
+                                         loc,
+                                         *new BridgedArrayRef(loggingASTScopeDeclConsumer.recordedElements.data(), loggingASTScopeDeclConsumer.recordedElements.size())
+                                         );
   
   llvm::outs() << "\n";
 }
