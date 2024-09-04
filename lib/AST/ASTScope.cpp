@@ -70,7 +70,7 @@ public:
 //      value->getLoc().printLineAndColumn(llvm::outs(), sourceFile->getASTContext().SourceMgr);
 //      llvm::outs() << "\n";
       
-      recordedElements.push_back(*new BridgedLocatedIdentifier(value->getBaseIdentifier(), value->getLoc()));
+      recordedElements.push_back(BridgedLocatedIdentifier(value->getBaseIdentifier(), value->getLoc()));
     }
     
     return originalConsumer->consume(values, baseDC);
@@ -142,17 +142,18 @@ void ASTScope::unqualifiedLookup(
   if (auto *s = SF->getASTContext().Stats)
     ++s->getFrontendCounters().NumASTScopeLookups;
   
-  llvm::outs() << "-------> Lookup started at: ";
+  llvm::outs() << "-----> Lookup started at: ";
   loc.printLineAndColumn(llvm::outs(), SF->getASTContext().SourceMgr);
   llvm::outs() << "\n";
   
-  LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = *new LoggingASTScopeDeclConsumer(&consumer);
+  LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = LoggingASTScopeDeclConsumer(&consumer);
   
   ASTScopeImpl::unqualifiedLookup(SF, loc, loggingASTScopeDeclConsumer);
   
   swift_ASTGen_validateUnqualifiedLookup(SF->getExportedSourceFile(),
                                          loc,
-                                         *new BridgedArrayRef(loggingASTScopeDeclConsumer.recordedElements.data(), loggingASTScopeDeclConsumer.recordedElements.size())
+                                         loggingASTScopeDeclConsumer.finishLookupInBraceStmt(nullptr),
+                                         BridgedArrayRef(loggingASTScopeDeclConsumer.recordedElements.data(), loggingASTScopeDeclConsumer.recordedElements.size())
                                          );
   
   llvm::outs() << "\n";

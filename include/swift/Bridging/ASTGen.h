@@ -161,6 +161,7 @@ void swift_ASTGen_freeConfiguredRegions(
 bool swift_ASTGen_validateUnqualifiedLookup(
     void *_Nonnull sourceFile,
     BridgedSourceLoc sourceLoc,
+    bool propagateToParent,
     BridgedArrayRef astScopeResultRef);
 
 #ifdef __cplusplus

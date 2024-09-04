@@ -19,6 +19,7 @@ import SwiftSyntax
 public func unqualifiedLookup(
   sourceFilePtr: UnsafeRawPointer,
   lookupAt: BridgedSourceLoc,
+  propagateToParent: Bool,
   astScopeResultRef: BridgedArrayRef
 ) -> Bool {
   let sourceFile = sourceFilePtr.assumingMemoryBound(to: ExportedSourceFile.self)
@@ -32,7 +33,7 @@ public func unqualifiedLookup(
     return false
   }
   
-  let lookupResults = performLookupAt.lookup(nil).flatMap { result in
+  let lookupResults = performLookupAt.lookup(nil, with: LookupConfig(propagateToParent: propagateToParent)).flatMap { result in
     result.names
   }
   
@@ -40,6 +41,8 @@ public func unqualifiedLookup(
   let count = astScopeResultRef.count
 
   let astScopeResultArray = Array(UnsafeBufferPointer(start: pointer, count: count))
+  
+  print("     |" + "ASTScope".addPaddingUpTo(characters: 20) + "|" + "SwiftLexicalLookup".addPaddingUpTo(characters: 20))
   
   var passed = true
   
@@ -89,6 +92,10 @@ public func unqualifiedLookup(
       if astResultPosition == newResultPosition &&
           astResultIdentifierStr == newResultIdentifierStr {
         prefix = "✅"
+      } else if astResultPosition == newResultPosition ||
+                astResultIdentifierStr == newResultIdentifierStr {
+        prefix = "⚠️"
+        passed = false
       } else {
         prefix = "❌"
         passed = false
