@@ -37,14 +37,32 @@ public func unqualifiedLookup(
     result.names
   }
   
-  let pointer = astScopeResultRef.data?.assumingMemoryBound(to: BridgedLocatedIdentifier.self)
+  var consoleOutput = "-----> Lookup started at: \(sourceLocationConverter.location(for: lookupPosition).lineWithColumn)\n"
+  consoleOutput += "     |" + "ASTScope".addPaddingUpTo(characters: 20) + "|" + "SwiftLexicalLookup".addPaddingUpTo(characters: 20) + "\n"
+  
+  let pointer = astScopeResultRef.data?.assumingMemoryBound(to: BridgedConsumedLookupResult.self)
   let count = astScopeResultRef.count
 
   let astScopeResultArray = Array(UnsafeBufferPointer(start: pointer, count: count))
   
-  print("     |" + "ASTScope".addPaddingUpTo(characters: 20) + "|" + "SwiftLexicalLookup".addPaddingUpTo(characters: 20))
-  
+  var astResultOffset = 0
   var passed = true
+  var wasLookupStopped = false
+  
+  if let firstASTResult = astScopeResultArray.first {
+    let resultPosition = sourceFile.pointee.position(of: firstASTResult.nameLoc)!
+    let token = sourceFileSyntax.token(at: resultPosition)
+    
+    // Check if the first name from declaration was introduced before it's end. COULD POSSIBLY OMIT BUGS!!!
+    if isInvalidFirstNameInDeclarationIntroduction(
+      sourceFile: sourceFileSyntax,
+      lookupPosition: lookupPosition,
+      firstNamePosition: resultPosition
+    ) {
+      consoleOutput += "> ℹ️ | Omitted first ASTScope name: \(token!.text) \(sourceLocationConverter.location(for: resultPosition).lineWithColumn)\n"
+      astResultOffset = 1
+    }
+  }
   
   for i in 0..<max(astScopeResultArray.count, lookupResults.count) {
     var prefix = ""
@@ -53,20 +71,28 @@ public func unqualifiedLookup(
     
     var astResultPosition: AbsolutePosition?
     var astResultIdentifierStr: String?
+    var flag = 0
     
-    if i < astScopeResultArray.count {
-      let locatedIdentifier = astScopeResultArray[i]
+    if astResultOffset + i < astScopeResultArray.count {
+      let consumedLookupResult = astScopeResultArray[astResultOffset + i]
       
-      let identifierPointer = locatedIdentifier.name.raw!.assumingMemoryBound(to: CChar.self)
-      astResultPosition = sourceFile.pointee.position(of: locatedIdentifier.nameLoc)!
+      let identifierPointer = consumedLookupResult.name.raw!.assumingMemoryBound(to: CChar.self)
+      astResultPosition = sourceFile.pointee.position(of: consumedLookupResult.nameLoc)!
+      
+      flag = consumedLookupResult.flag
+      if flag == 1 {
+        wasLookupStopped = true
+      }
       
       astResultIdentifierStr = String(cString: identifierPointer)
       
       astResultStr = astResultIdentifierStr! + " " + sourceLocationConverter.location(for: astResultPosition!).lineWithColumn
-    } else {
-      prefix = "❌"
+    } else if i >= astScopeResultArray.count {
+      if !wasLookupStopped {
+        prefix = "❌"
+        passed = false
+      }
       astResultStr = "-----"
-      passed = false
     }
     
     var newResultPosition: AbsolutePosition?
@@ -79,18 +105,21 @@ public func unqualifiedLookup(
       newResultIdentifierStr = newResult.identifier!.name
       
       newResultStr = newResultIdentifierStr! + " " + sourceLocationConverter.location(for: newResultPosition!).lineWithColumn
-    } else {
-      prefix = "❌"
+    } else if i < astScopeResultArray.count - astResultOffset {
+      if !wasLookupStopped {
+        prefix = "❌"
+        passed = false
+      }
+      
       newResultStr = "-----"
-      passed = false
     }
     
     if let astResultPosition,
        let astResultIdentifierStr,
        let newResultPosition,
         let newResultIdentifierStr {
-      if astResultPosition == newResultPosition &&
-          astResultIdentifierStr == newResultIdentifierStr {
+      if (astResultPosition == newResultPosition &&
+          astResultIdentifierStr == newResultIdentifierStr || wasLookupStopped) {
         prefix = "✅"
       } else if astResultPosition == newResultPosition ||
                 astResultIdentifierStr == newResultIdentifierStr {
@@ -100,12 +129,46 @@ public func unqualifiedLookup(
         prefix = "❌"
         passed = false
       }
+    } else if wasLookupStopped {
+      prefix = "✅"
     }
     
-    print("> \(prefix) |\(astResultStr.addPaddingUpTo(characters: 20))|\(newResultStr.addPaddingUpTo(characters: 20))")
+    guard astResultPosition != nil || newResultPosition != nil else { continue }
+    
+    consoleOutput += "> \(prefix) |\(astResultStr.addPaddingUpTo(characters: 20))|\(newResultStr.addPaddingUpTo(characters: 20))"
+    
+    if flag == 1 {
+      consoleOutput += "-> Lookup stop flag"
+    }
+    
+    consoleOutput += "\n"
+  }
+  
+  if !passed {
+    print(consoleOutput)
   }
   
   return passed
+}
+
+private func isInvalidFirstNameInDeclarationIntroduction(sourceFile: SourceFileSyntax,
+                                                         lookupPosition: AbsolutePosition,
+                                                         firstNamePosition: AbsolutePosition) -> Bool {
+  let originToken = sourceFile.token(at: lookupPosition)
+  let firstNameToken = sourceFile.token(at: firstNamePosition)
+  
+  let originClosestVariableDeclAncestor = originToken?.ancestorOrSelf { syntax in
+    syntax.as(VariableDeclSyntax.self)
+  }
+  let firstNameClosestVariableDeclAncestor = firstNameToken?.ancestorOrSelf { syntax in
+    syntax.as(VariableDeclSyntax.self)
+  }
+  
+  guard let originClosestVariableDeclAncestor,
+        let firstNameClosestVariableDeclAncestor
+  else { return false }
+  
+  return originClosestVariableDeclAncestor == firstNameClosestVariableDeclAncestor
 }
 
 extension SourceLocation {

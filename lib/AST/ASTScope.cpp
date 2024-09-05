@@ -45,7 +45,7 @@ private:
   namelookup::AbstractASTScopeDeclConsumer *originalConsumer;
   
 public:
-  SmallVector<BridgedLocatedIdentifier> recordedElements;
+  SmallVector<BridgedConsumedLookupResult> recordedElements;
   
   LoggingASTScopeDeclConsumer(namelookup::AbstractASTScopeDeclConsumer *consumer) : originalConsumer(consumer) {}
 
@@ -63,6 +63,8 @@ public:
   /// \return true if the lookup should be stopped at this point.
   bool consume(ArrayRef<ValueDecl *> values,
                NullablePtr<DeclContext> baseDC = nullptr) override {
+    bool result = originalConsumer->consume(values, baseDC);
+    
     for (auto value : values) {
 //      llvm::outs() << "Matching name: ";
 //      value->print(llvm::outs());
@@ -70,10 +72,10 @@ public:
 //      value->getLoc().printLineAndColumn(llvm::outs(), sourceFile->getASTContext().SourceMgr);
 //      llvm::outs() << "\n";
       
-      recordedElements.push_back(BridgedLocatedIdentifier(value->getBaseIdentifier(), value->getLoc()));
+      recordedElements.push_back(BridgedConsumedLookupResult(value->getBaseIdentifier(), value->getLoc(), result));
     }
     
-    return originalConsumer->consume(values, baseDC);
+    return result;
   };
   
   static void printBridgedLocatedIdentifier(BridgedLocatedIdentifier *locatedIdentifier, SourceFile *sourceFile, raw_ostream &os) {
@@ -142,21 +144,23 @@ void ASTScope::unqualifiedLookup(
   if (auto *s = SF->getASTContext().Stats)
     ++s->getFrontendCounters().NumASTScopeLookups;
   
-  llvm::outs() << "-----> Lookup started at: ";
-  loc.printLineAndColumn(llvm::outs(), SF->getASTContext().SourceMgr);
-  llvm::outs() << "\n";
-  
-  LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = LoggingASTScopeDeclConsumer(&consumer);
-  
-  ASTScopeImpl::unqualifiedLookup(SF, loc, loggingASTScopeDeclConsumer);
-  
-  swift_ASTGen_validateUnqualifiedLookup(SF->getExportedSourceFile(),
-                                         loc,
-                                         loggingASTScopeDeclConsumer.finishLookupInBraceStmt(nullptr),
-                                         BridgedArrayRef(loggingASTScopeDeclConsumer.recordedElements.data(), loggingASTScopeDeclConsumer.recordedElements.size())
-                                         );
-  
-  llvm::outs() << "\n";
+  if (SF->getASTContext().LangOpts.hasFeature(Feature::UnqualifiedLookupValidation)) {    
+    LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = LoggingASTScopeDeclConsumer(&consumer);
+    
+    ASTScopeImpl::unqualifiedLookup(SF, loc, loggingASTScopeDeclConsumer);
+    
+    bool passed = swift_ASTGen_validateUnqualifiedLookup(SF->getExportedSourceFile(),
+                                           loc,
+                                           loggingASTScopeDeclConsumer.finishLookupInBraceStmt(nullptr),
+                                           BridgedArrayRef(loggingASTScopeDeclConsumer.recordedElements.data(), loggingASTScopeDeclConsumer.recordedElements.size())
+                                           );
+    
+    if (!passed) {
+      SF->getASTContext().Diags.diagnose(loc, diag::lookup_outputs_dont_match);
+    }
+  } else {
+    ASTScopeImpl::unqualifiedLookup(SF, loc, consumer);
+  }
 }
 
 llvm::SmallVector<LabeledStmt *, 4> ASTScope::lookupLabeledStmts(
