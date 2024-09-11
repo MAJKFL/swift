@@ -45,7 +45,7 @@ private:
   namelookup::AbstractASTScopeDeclConsumer *originalConsumer;
   
 public:
-  SmallVector<BridgedConsumedLookupResult> recordedElements;
+  mutable SmallVector<BridgedConsumedLookupResult> recordedElements;
   
   LoggingASTScopeDeclConsumer(namelookup::AbstractASTScopeDeclConsumer *consumer) : originalConsumer(consumer) {}
 
@@ -66,35 +66,24 @@ public:
     bool result = originalConsumer->consume(values, baseDC);
     
     for (auto value : values) {
-//      llvm::outs() << "Matching name: ";
-//      value->print(llvm::outs());
-//      llvm::outs() << " at: ";
-//      value->getLoc().printLineAndColumn(llvm::outs(), sourceFile->getASTContext().SourceMgr);
-//      llvm::outs() << "\n";
-      
       recordedElements.push_back(BridgedConsumedLookupResult(value->getBaseIdentifier(), value->getLoc(), result));
     }
     
     return result;
   };
-  
-  static void printBridgedLocatedIdentifier(BridgedLocatedIdentifier *locatedIdentifier, SourceFile *sourceFile, raw_ostream &os) {
-    os << "Matching name: ";
-    os << locatedIdentifier->Name.unbridged();
-    os << " at: ";
-    locatedIdentifier->NameLoc.unbridged().printLineAndColumn(os, sourceFile->getASTContext().SourceMgr);
-    llvm::outs() << "\n";
-  }
 
   /// Look for members of a nominal type or extension scope.
   ///
   /// \return true if the lookup should be stopped at this point.
   bool lookInMembers(const DeclContext *scopeDC) const override {
-//    llvm::outs() << "Lookup in members of: ";
-//    scopeDC->printContext(llvm::outs());
-//    llvm::outs() << "\n";
-    
-    return originalConsumer->lookInMembers(scopeDC);
+    bool result = originalConsumer->lookInMembers(scopeDC);
+    recordedElements.push_back(BridgedConsumedLookupResult(
+                                                           scopeDC->getSelfNominalTypeDecl()->getBaseIdentifier(),
+                                                           scopeDC->getSelfNominalTypeDecl()->getLoc(),
+                                                           0b10 + result
+                                                           )
+                               );
+    return result;
   };
 
   /// Called for local VarDecls that might not yet be in scope.

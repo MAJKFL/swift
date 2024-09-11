@@ -33,61 +33,76 @@ public func unqualifiedLookup(
     return false
   }
   
-  let lookupResults = performLookupAt.lookup(nil, with: LookupConfig(propagateToParent: propagateToParent)).flatMap { result in
-    result.names
-  }
-  
-  var consoleOutput = "-----> Lookup started at: \(sourceLocationConverter.location(for: lookupPosition).lineWithColumn)\n"
-  consoleOutput += "     |" + "ASTScope".addPaddingUpTo(characters: 20) + "|" + "SwiftLexicalLookup".addPaddingUpTo(characters: 20) + "\n"
-  
   let pointer = astScopeResultRef.data?.assumingMemoryBound(to: BridgedConsumedLookupResult.self)
   let count = astScopeResultRef.count
 
   let astScopeResultArray = Array(UnsafeBufferPointer(start: pointer, count: count))
   
+  let ASTScopeResults = astScopeResultArray.map { bridgedResult in
+    let identifierPointer = bridgedResult.name.raw?.assumingMemoryBound(to: CChar.self)
+    let astResultPosition = sourceFile.pointee.position(of: bridgedResult.nameLoc)
+    
+    return ConsumedLookupResult(
+      name: identifierPointer == nil ? "" : String(cString: identifierPointer!),
+      position: astResultPosition ?? AbsolutePosition(utf8Offset: 0),
+      flag: bridgedResult.flag
+    )
+  }
+  
+  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInBraceStatement: propagateToParent))
+    .flatMap { result in
+      if case .lookInMembers(let namedDecl) = result {
+        return [ConsumedLookupResult(name: namedDecl.name.text, position: namedDecl.name.position, flag: 0b10)]
+      } else {
+        return result.names.map { name in
+          ConsumedLookupResult(name: name.identifier!.name, position: name.position, flag: 0)
+        }
+      }
+    }
+  
+  var consoleOutput = "-----> Lookup started at: \(sourceLocationConverter.location(for: lookupPosition).lineWithColumn) (\"\(performLookupAt.text)\")\n"
+  consoleOutput += "     |" + "ASTScope".addPaddingUpTo(characters: 20) + "|" + "SwiftLexicalLookup".addPaddingUpTo(characters: 20) + "\n"
+  
+  var i = 0
   var astResultOffset = 0
+  var encounteredASTNames = Set<ConsumedLookupResult>()
   var passed = true
   var wasLookupStopped = false
   
-  if let firstASTResult = astScopeResultArray.first {
-    let resultPosition = sourceFile.pointee.position(of: firstASTResult.nameLoc)!
-    let token = sourceFileSyntax.token(at: resultPosition)
-    
+  if let firstASTResult = ASTScopeResults.first {
     // Check if the first name from declaration was introduced before it's end. COULD POSSIBLY OMIT BUGS!!!
     if isInvalidFirstNameInDeclarationIntroduction(
       sourceFile: sourceFileSyntax,
       lookupPosition: lookupPosition,
-      firstNamePosition: resultPosition
+      firstNamePosition: firstASTResult.position
     ) {
-      consoleOutput += "> ℹ️ | Omitted first ASTScope name: \(token!.text) \(sourceLocationConverter.location(for: resultPosition).lineWithColumn)\n"
+      consoleOutput += "> ℹ️ | Omitted ASTScope name: \(firstASTResult.name) \(sourceLocationConverter.location(for: firstASTResult.position).lineWithColumn)\n"
       astResultOffset = 1
     }
   }
   
-  for i in 0..<max(astScopeResultArray.count, lookupResults.count) {
+  while i < max(ASTScopeResults.count, SLLookupResults.count) {
     var prefix = ""
     var astResultStr = ""
-    var newResultStr = ""
+    var sllResultStr = ""
     
-    var astResultPosition: AbsolutePosition?
-    var astResultIdentifierStr: String?
-    var flag = 0
+    var astResult: ConsumedLookupResult?
     
-    if astResultOffset + i < astScopeResultArray.count {
-      let consumedLookupResult = astScopeResultArray[astResultOffset + i]
+    if astResultOffset + i < ASTScopeResults.count {
+      astResult = ASTScopeResults[astResultOffset + i]
       
-      let identifierPointer = consumedLookupResult.name.raw!.assumingMemoryBound(to: CChar.self)
-      astResultPosition = sourceFile.pointee.position(of: consumedLookupResult.nameLoc)!
-      
-      flag = consumedLookupResult.flag
-      if flag == 1 {
-        wasLookupStopped = true
+      if !astResult!.shouldLookInMembers {
+        let (isFirstEncounter, _) = encounteredASTNames.insert(astResult!)
+        
+        guard isFirstEncounter else {
+          consoleOutput += "> ℹ️ | Omitted ASTScope name: \(astResult!.name) \(sourceLocationConverter.location(for: astResult!.position).lineWithColumn)\n"
+          astResultOffset += 1
+          continue
+        }
       }
       
-      astResultIdentifierStr = String(cString: identifierPointer)
-      
-      astResultStr = astResultIdentifierStr! + " " + sourceLocationConverter.location(for: astResultPosition!).lineWithColumn
-    } else if i >= astScopeResultArray.count {
+      astResultStr += astResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
+    } else if i >= ASTScopeResults.count {
       if !wasLookupStopped {
         prefix = "❌"
         passed = false
@@ -95,34 +110,29 @@ public func unqualifiedLookup(
       astResultStr = "-----"
     }
     
-    var newResultPosition: AbsolutePosition?
-    var newResultIdentifierStr: String?
+    var sllResult: ConsumedLookupResult?
     
-    if i < lookupResults.count {
-      let newResult = lookupResults[i]
+    if i < SLLookupResults.count {
+      sllResult = SLLookupResults[i]
       
-      newResultPosition = newResult.syntax.position
-      newResultIdentifierStr = newResult.identifier!.name
-      
-      newResultStr = newResultIdentifierStr! + " " + sourceLocationConverter.location(for: newResultPosition!).lineWithColumn
-    } else if i < astScopeResultArray.count - astResultOffset {
+      sllResultStr = sllResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
+    } else if i - astResultOffset >= SLLookupResults.count {
       if !wasLookupStopped {
         prefix = "❌"
         passed = false
       }
       
-      newResultStr = "-----"
+      sllResultStr = "-----"
     }
     
-    if let astResultPosition,
-       let astResultIdentifierStr,
-       let newResultPosition,
-        let newResultIdentifierStr {
-      if (astResultPosition == newResultPosition &&
-          astResultIdentifierStr == newResultIdentifierStr || wasLookupStopped) {
+    i += 1
+    
+    if let astResult, let sllResult {
+      if (astResult.position == sllResult.position &&
+          astResult.name == sllResult.name || wasLookupStopped) {
         prefix = "✅"
-      } else if astResultPosition == newResultPosition ||
-                astResultIdentifierStr == newResultIdentifierStr {
+      } else if astResult.position == sllResult.position ||
+                astResult.name == sllResult.name {
         prefix = "⚠️"
         passed = false
       } else {
@@ -130,14 +140,15 @@ public func unqualifiedLookup(
         passed = false
       }
     } else if wasLookupStopped {
-      prefix = "✅"
+      prefix = "⏩"
     }
     
-    guard astResultPosition != nil || newResultPosition != nil else { continue }
+    guard astResult != nil || sllResult != nil else { continue }
     
-    consoleOutput += "> \(prefix) |\(astResultStr.addPaddingUpTo(characters: 20))|\(newResultStr.addPaddingUpTo(characters: 20))"
+    consoleOutput += "> \(prefix) |\(astResultStr.addPaddingUpTo(characters: 20))|\(sllResultStr.addPaddingUpTo(characters: 20))"
     
-    if flag == 1 {
+    if let astResult, astResult.isTheEndOfLookup {
+      wasLookupStopped = true
       consoleOutput += "-> Lookup stop flag"
     }
     
@@ -169,6 +180,24 @@ private func isInvalidFirstNameInDeclarationIntroduction(sourceFile: SourceFileS
   else { return false }
   
   return originClosestVariableDeclAncestor == firstNameClosestVariableDeclAncestor
+}
+
+fileprivate struct ConsumedLookupResult: Hashable {
+  var name: String
+  var position: AbsolutePosition
+  var flag: Int
+  
+  var isTheEndOfLookup: Bool {
+    flag & 0b01 != 0
+  }
+  
+  var shouldLookInMembers: Bool {
+    flag & 0b10 != 0
+  }
+  
+  func consoleLogStr(sourceLocationConverter: SourceLocationConverter) -> String {
+    (shouldLookInMembers ? "Look memb: " : "") + name + " " + sourceLocationConverter.location(for: position).lineWithColumn
+  }
 }
 
 extension SourceLocation {
