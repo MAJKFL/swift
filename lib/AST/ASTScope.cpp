@@ -66,7 +66,18 @@ public:
     bool result = originalConsumer->consume(values, baseDC);
     
     for (auto value : values) {
-      recordedElements.push_back(BridgedConsumedLookupResult(value->getBaseIdentifier(), value->getLoc(), result));
+      int isGenericParameterFlag = 0;
+      
+      if (auto genericParam = dyn_cast<GenericTypeParamDecl>(value)) {
+        isGenericParameterFlag = 0b100;
+      }
+      
+      recordedElements.push_back(BridgedConsumedLookupResult(
+                                                             value->getBaseIdentifier(),
+                                                             value->getLoc(),
+                                                             isGenericParameterFlag + result
+                                                             )
+                                 );
     }
     
     return result;
@@ -77,12 +88,23 @@ public:
   /// \return true if the lookup should be stopped at this point.
   bool lookInMembers(const DeclContext *scopeDC) const override {
     bool result = originalConsumer->lookInMembers(scopeDC);
-    recordedElements.push_back(BridgedConsumedLookupResult(
-                                                           scopeDC->getSelfNominalTypeDecl()->getBaseIdentifier(),
-                                                           scopeDC->getSelfNominalTypeDecl()->getLoc(),
-                                                           0b10 + result
-                                                           )
-                               );
+    
+    if (auto *extDecl = dyn_cast<ExtensionDecl>(scopeDC)) {
+      recordedElements.push_back(BridgedConsumedLookupResult(
+                                                             Identifier(),
+                                                             extDecl->getExtendedTypeRepr()->getLoc(),
+                                                             0b10 + result
+                                                             )
+                                 );
+    } else {
+      recordedElements.push_back(BridgedConsumedLookupResult(
+                                                             scopeDC->getSelfNominalTypeDecl()->getBaseIdentifier(),
+                                                             scopeDC->getAsDecl()->getLoc(),
+                                                             0b10 + result
+                                                             )
+                                 );
+    }
+    
     return result;
   };
 

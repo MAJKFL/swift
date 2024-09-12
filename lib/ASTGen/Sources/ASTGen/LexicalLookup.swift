@@ -40,22 +40,31 @@ public func unqualifiedLookup(
   
   let ASTScopeResults = astScopeResultArray.map { bridgedResult in
     let identifierPointer = bridgedResult.name.raw?.assumingMemoryBound(to: CChar.self)
-    let astResultPosition = sourceFile.pointee.position(of: bridgedResult.nameLoc)
+    let astResultPosition = sourceFile.pointee.position(of: bridgedResult.nameLoc)!
     
     return ConsumedLookupResult(
-      name: identifierPointer == nil ? "" : String(cString: identifierPointer!),
-      position: astResultPosition ?? AbsolutePosition(utf8Offset: 0),
+      rawName: identifierPointer == nil ? "" : String(cString: identifierPointer!),
+      position: astResultPosition,
       flag: bridgedResult.flag
     )
   }
   
-  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInBraceStatement: propagateToParent))
+  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInBraceStatement: propagateToParent, includeMembers: false))
     .flatMap { result in
-      if case .lookInMembers(let namedDecl) = result {
-        return [ConsumedLookupResult(name: namedDecl.name.text, position: namedDecl.name.position, flag: 0b10)]
+      if case .lookInMembers(let lookInMembers) = result {
+        return [ConsumedLookupResult(rawName: "", position: lookInMembers.lookupMembersPosition, flag: 0b010)]
       } else {
-        return result.names.map { name in
-          ConsumedLookupResult(name: name.identifier!.name, position: name.position, flag: 0)
+        if let scope = result.scope,
+           let parent = scope.parent,
+           scope.is(GenericParameterClauseSyntax.self),
+           (parent.is(FunctionDeclSyntax.self) || scope.range.contains(lookupPosition)) { // If a result from function generic parameter clause or lookup started within it, reverse introduced names. Simple heuristic to deal with weird ASTScope behavior.
+          return result.names.reversed().map { name in
+            ConsumedLookupResult(rawName: name.identifier!.name, position: name.position, flag: 0)
+          }
+        } else {
+          return result.names.map { name in
+            ConsumedLookupResult(rawName: name.identifier!.name, position: name.position, flag: 0)
+          }
         }
       }
     }
@@ -127,6 +136,8 @@ public func unqualifiedLookup(
     
     i += 1
     
+    guard astResult != nil || sllResult != nil else { continue }
+    
     if let astResult, let sllResult {
       if (astResult.position == sllResult.position &&
           astResult.name == sllResult.name || wasLookupStopped) {
@@ -141,9 +152,10 @@ public func unqualifiedLookup(
       }
     } else if wasLookupStopped {
       prefix = "⏩"
+    } else {
+      prefix = "❌"
+      passed = false
     }
-    
-    guard astResult != nil || sllResult != nil else { continue }
     
     consoleOutput += "> \(prefix) |\(astResultStr.addPaddingUpTo(characters: 20))|\(sllResultStr.addPaddingUpTo(characters: 20))"
     
@@ -168,6 +180,19 @@ private func isInvalidFirstNameInDeclarationIntroduction(sourceFile: SourceFileS
   let originToken = sourceFile.token(at: lookupPosition)
   let firstNameToken = sourceFile.token(at: firstNamePosition)
   
+  let originClosestClosureExprAncestor = originToken?.ancestorOrSelf { syntax in
+    syntax.as(ClosureExprSyntax.self)
+  }
+  let firstNameClosestClosureExprAncestor = firstNameToken?.ancestorOrSelf { syntax in
+    syntax.as(ClosureExprSyntax.self)
+  }
+  
+  if let originClosestClosureExprAncestor,
+     let firstNameClosestClosureExprAncestor,
+     originClosestClosureExprAncestor == firstNameClosestClosureExprAncestor {
+    return false
+  }
+  
   let originClosestVariableDeclAncestor = originToken?.ancestorOrSelf { syntax in
     syntax.as(VariableDeclSyntax.self)
   }
@@ -183,16 +208,20 @@ private func isInvalidFirstNameInDeclarationIntroduction(sourceFile: SourceFileS
 }
 
 fileprivate struct ConsumedLookupResult: Hashable {
-  var name: String
+  var rawName: String
   var position: AbsolutePosition
   var flag: Int
   
+  var name: String {
+    shouldLookInMembers ? "" : rawName
+  }
+  
   var isTheEndOfLookup: Bool {
-    flag & 0b01 != 0
+    flag & 0b001 != 0
   }
   
   var shouldLookInMembers: Bool {
-    flag & 0b10 != 0
+    flag & 0b010 != 0
   }
   
   func consoleLogStr(sourceLocationConverter: SourceLocationConverter) -> String {
