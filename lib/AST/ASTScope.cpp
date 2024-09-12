@@ -66,16 +66,10 @@ public:
     bool result = originalConsumer->consume(values, baseDC);
     
     for (auto value : values) {
-      int isGenericParameterFlag = 0;
-      
-      if (auto genericParam = dyn_cast<GenericTypeParamDecl>(value)) {
-        isGenericParameterFlag = 0b100;
-      }
-      
       recordedElements.push_back(BridgedConsumedLookupResult(
                                                              value->getBaseIdentifier(),
                                                              value->getLoc(),
-                                                             isGenericParameterFlag + result
+                                                             result
                                                              )
                                  );
     }

@@ -59,7 +59,7 @@ public func unqualifiedLookup(
            scope.is(GenericParameterClauseSyntax.self),
            (parent.is(FunctionDeclSyntax.self) || scope.range.contains(lookupPosition)) { // If a result from function generic parameter clause or lookup started within it, reverse introduced names. Simple heuristic to deal with weird ASTScope behavior.
           return result.names.reversed().map { name in
-            ConsumedLookupResult(rawName: name.identifier!.name, position: name.position, flag: 0)
+            ConsumedLookupResult(rawName: name.identifier!.name, position: name.position, flag: 0b100)
           }
         } else {
           return result.names.map { name in
@@ -224,8 +224,14 @@ fileprivate struct ConsumedLookupResult: Hashable {
     flag & 0b010 != 0
   }
   
+  var resultPlacementRearranged: Bool {
+    flag & 0b100 != 0
+  }
+  
   func consoleLogStr(sourceLocationConverter: SourceLocationConverter) -> String {
-    (shouldLookInMembers ? "Look memb: " : "") + name + " " + sourceLocationConverter.location(for: position).lineWithColumn
+    (resultPlacementRearranged ? "↕️ " : "") +
+    (shouldLookInMembers ? "Look memb: " : "\(name) ") +
+    sourceLocationConverter.location(for: position).lineWithColumn
   }
 }
 
