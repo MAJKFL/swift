@@ -534,6 +534,12 @@ public:
     /// Indexes of Reflection Infos we've already processed.
     llvm::DenseSet<size_t> ProcessedReflectionInfoIndexes;
 
+    /// Cache for capture descriptor lookups.
+    std::unordered_map<uint64_t /* remote address*/,
+                       RemoteRef<CaptureDescriptor>>
+        CaptureDescriptorsByAddress;
+    uint32_t CaptureDescriptorsByAddressLastReflectionInfoCache = 0;
+
     /// Cache for field info lookups.
     std::unordered_map<std::string, RemoteRef<FieldDescriptor>>
         FieldTypeInfoCache;
@@ -908,6 +914,16 @@ public:
 
   const TypeRef *createParenType(const TypeRef *base) {
     // TypeRefs don't contain sugared types
+    return nullptr;
+  }
+
+  const TypeRef *createIntegerType(intptr_t value) {
+    // FIXME: implement
+    return nullptr;
+  }
+
+  const TypeRef *createNegativeIntegerType(intptr_t value) {
+    // FIXME: implement
     return nullptr;
   }
 

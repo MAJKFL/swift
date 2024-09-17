@@ -362,7 +362,7 @@ EXPERIMENTAL_FEATURE(StructLetDestructuring, true)
 
 /// Enable non-escapable type attributes and function attributes that support
 /// lifetime-dependent results.
-EXPERIMENTAL_FEATURE(NonescapableTypes, true)
+SUPPRESSIBLE_EXPERIMENTAL_FEATURE(NonescapableTypes, true)
 
 /// Enable the `@_staticExclusiveOnly` attribute.
 EXPERIMENTAL_FEATURE(StaticExclusiveOnly, true)
@@ -400,10 +400,20 @@ EXPERIMENTAL_FEATURE(ReinitializeConsumeInMultiBlockDefer, false)
 
 EXPERIMENTAL_FEATURE(SE427NoInferenceOnExtension, true)
 
+
 EXPERIMENTAL_FEATURE(Extern, true)
 
 // Enable trailing comma for comma-separated lists.
 EXPERIMENTAL_FEATURE(TrailingComma, false)
+
+/// Allow the @unsafe attribute.
+SUPPRESSIBLE_EXPERIMENTAL_FEATURE(AllowUnsafeAttribute, true)
+
+/// Warn on use of unsafe constructs.
+EXPERIMENTAL_FEATURE(WarnUnsafe, true)
+
+// Enable values in generic signatures, e.g. <let N: Int>
+EXPERIMENTAL_FEATURE(ValueGenerics, true)
 
 #undef EXPERIMENTAL_FEATURE_EXCLUDED_FROM_MODULE_INTERFACE
 #undef EXPERIMENTAL_FEATURE

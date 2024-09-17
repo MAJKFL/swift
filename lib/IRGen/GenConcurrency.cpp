@@ -46,7 +46,7 @@ public:
                    Size size, Alignment align, SpareBitVector &&spareBits)
       : TrivialScalarPairTypeInfo(storageType, size, std::move(spareBits),
                                   align, IsTriviallyDestroyable,
-                                  IsCopyable, IsFixedSize) {}
+                                  IsCopyable, IsFixedSize, IsABIAccessible) {}
 
   static Size getFirstElementSize(IRGenModule &IGM) {
     return IGM.getPointerSize();
@@ -258,8 +258,8 @@ llvm::Value *irgen::emitBuiltinStartAsyncLet(IRGenFunction &IGF,
   // space, so that we don't run into that bug. We leave a note on the
   // declaration so that coroutine splitting can pad out the final context
   // size after splitting.
-  auto deploymentAvailability
-    = AvailabilityContext::forDeploymentTarget(IGF.IGM.Context);
+  auto deploymentAvailability =
+      AvailabilityRange::forDeploymentTarget(IGF.IGM.Context);
   if (!deploymentAvailability.isContainedIn(
                                    IGF.IGM.Context.getSwift57Availability()))
   {

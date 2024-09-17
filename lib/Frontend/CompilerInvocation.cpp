@@ -525,7 +525,6 @@ static void ParseModuleInterfaceArgs(ModuleInterfaceOptions &Opts,
     Args.hasArg(OPT_debug_emit_invalid_swiftinterface_syntax);
   Opts.PrintMissingImports =
     !Args.hasArg(OPT_disable_print_missing_imports_in_module_interface);
-  Opts.DisablePackageNameForNonPackageInterface |= Args.hasArg(OPT_disable_print_package_name_for_non_package_interface);
 
   if (const Arg *A = Args.getLastArg(OPT_library_level)) {
     StringRef contents = A->getValue();
@@ -557,8 +556,8 @@ static bool ShouldIncludeModuleInterfaceArg(const Arg *A) {
 
 static bool IsPackageInterfaceFlag(const Arg *A, ArgList &Args) {
   return A->getOption().matches(options::OPT_package_name) &&
-         Args.hasArg(
-             options::OPT_disable_print_package_name_for_non_package_interface);
+         !Args.hasArg(
+             options::OPT_print_package_name_in_non_package_interface);
 }
 
 static bool IsPrivateInterfaceFlag(const Arg *A, ArgList &Args) {
@@ -1014,6 +1013,21 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     Opts.EnableExperimentalStringProcessing = true;
   }
 
+  auto enableUpcomingFeature = [&Opts, &Diags](Feature feature) -> bool {
+    // Check if this feature was introduced already in this language version.
+    if (auto firstVersion = getFeatureLanguageVersion(feature)) {
+      if (Opts.isSwiftVersionAtLeast(*firstVersion)) {
+        Diags.diagnose(SourceLoc(), diag::error_upcoming_feature_on_by_default,
+                       getFeatureName(feature), *firstVersion);
+        return true;
+      }
+    }
+
+    Opts.enableFeature(feature);
+    return false;
+  };
+
+  // Enable experimental features.
   for (const Arg *A : Args.filtered(OPT_enable_experimental_feature)) {
     // Allow StrictConcurrency to have a value that corresponds to the
     // -strict-concurrency=<blah> settings.
@@ -1040,12 +1054,14 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
       } else {
         Opts.enableFeature(*feature);
       }
+    }
 
-      if (*feature == Feature::NoncopyableGenerics2)
-        Opts.enableFeature(Feature::NoncopyableGenerics);
-
-      if (*feature == Feature::IsolatedAny2)
-        Opts.enableFeature(Feature::IsolatedAny);
+    // For compatibility, upcoming features can be enabled with the
+    // -enable-experimental-feature flag too since the feature may have
+    // graduated from being experimental.
+    if (auto feature = getUpcomingFeature(value)) {
+      if (enableUpcomingFeature(*feature))
+        HadError = true;
     }
 
     // Hack: In order to support using availability macros in SPM packages, we
@@ -1062,24 +1078,15 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     }
   }
 
-  // Map historical flags over to future features.
+  // Enable upcoming features.
   for (const Arg *A : Args.filtered(OPT_enable_upcoming_feature)) {
     // Ignore unknown features.
     auto feature = getUpcomingFeature(A->getValue());
     if (!feature)
       continue;
 
-    // Check if this feature was introduced already in this language version.
-    if (auto firstVersion = getFeatureLanguageVersion(*feature)) {
-      if (Opts.isSwiftVersionAtLeast(*firstVersion)) {
-        Diags.diagnose(SourceLoc(), diag::error_upcoming_feature_on_by_default,
-                       A->getValue(), *firstVersion);
-        continue;
-      }
-    }
-
-    // Add the feature.
-    Opts.enableFeature(*feature);
+    if (enableUpcomingFeature(*feature))
+      HadError = true;
   }
 
   // Map historical flags over to experimental features. We do this for all
@@ -2323,10 +2330,29 @@ static bool ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   Opts.FixitCodeForAllDiagnostics |= Args.hasArg(OPT_fixit_all);
   Opts.SuppressWarnings |= Args.hasArg(OPT_suppress_warnings);
   Opts.SuppressRemarks |= Args.hasArg(OPT_suppress_remarks);
-  Opts.WarningsAsErrors = Args.hasFlag(options::OPT_warnings_as_errors,
-                                       options::OPT_no_warnings_as_errors,
-                                       false);
-  Opts.PrintDiagnosticNames |= Args.hasArg(OPT_debug_diagnostic_names);
+  for (const Arg *arg : Args.filtered(OPT_warning_treating_Group)) {
+    Opts.WarningsAsErrorsRules.push_back([&] {
+      switch (arg->getOption().getID()) {
+      case OPT_warnings_as_errors:
+        return WarningAsErrorRule(WarningAsErrorRule::Action::Enable);
+      case OPT_no_warnings_as_errors:
+        return WarningAsErrorRule(WarningAsErrorRule::Action::Disable);
+      case OPT_Werror:
+        return WarningAsErrorRule(WarningAsErrorRule::Action::Enable,
+                                  arg->getValue());
+      case OPT_Wwarning:
+        return WarningAsErrorRule(WarningAsErrorRule::Action::Disable,
+                                  arg->getValue());
+      default:
+        llvm_unreachable("unhandled warning as error option");
+      }
+    }());
+  }
+  if (Args.hasArg(OPT_debug_diagnostic_names)) {
+    Opts.PrintDiagnosticNames = PrintDiagnosticNamesMode::Identifier;
+  } else if (Args.hasArg(OPT_print_diagnostic_groups)) {
+    Opts.PrintDiagnosticNames = PrintDiagnosticNamesMode::Group;
+  }
   Opts.PrintEducationalNotes |= Args.hasArg(OPT_print_educational_notes);
   if (Arg *A = Args.getLastArg(OPT_diagnostic_documentation_path)) {
     Opts.DiagnosticDocumentationPath = A->getValue();
@@ -2368,7 +2394,9 @@ static bool ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
       Opts.LocalizationPath = A->getValue();
     }
   }
-  assert(!(Opts.WarningsAsErrors && Opts.SuppressWarnings) &&
+  assert(!(Opts.SuppressWarnings &&
+           WarningAsErrorRule::hasConflictsWithSuppressWarnings(
+               Opts.WarningsAsErrorsRules)) &&
          "conflicting arguments; should have been caught by driver");
 
   return false;
@@ -2661,6 +2689,9 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   Opts.EnableThrowsPrediction = Args.hasFlag(
       OPT_enable_throws_prediction, OPT_disable_throws_prediction,
       Opts.EnableThrowsPrediction);
+  Opts.EnableNoReturnCold = Args.hasFlag(
+      OPT_enable_noreturn_prediction, OPT_disable_noreturn_prediction,
+      Opts.EnableNoReturnCold);
   Opts.EnableActorDataRaceChecks |= Args.hasFlag(
       OPT_enable_actor_data_race_checks,
       OPT_disable_actor_data_race_checks, /*default=*/false);
@@ -2680,6 +2711,8 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
       Diags.diagnose(SourceLoc(), diag::ignoring_option_requires_option,
                      "-package-cmo",
                      "-allow-non-resilient-access");
+    } else if (!FEOpts.EnableLibraryEvolution) {
+      Diags.diagnose(SourceLoc(), diag::package_cmo_requires_library_evolution);
     } else {
       Opts.EnableSerializePackage = true;
       Opts.CMOMode = CrossModuleOptimizationMode::Default;
@@ -3427,6 +3460,10 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
       Args.hasFlag(OPT_enable_split_cold_code,
                    OPT_disable_split_cold_code,
                    Opts.EnableHotColdSplit);
+  Opts.EmitAsyncFramePushPopMetadata =
+    Args.hasFlag(OPT_enable_async_frame_push_pop_metadata,
+                 OPT_disable_async_frame_push_pop_metadata,
+                 Opts.EmitAsyncFramePushPopMetadata);
   Opts.EnableLargeLoadableTypesReg2Mem =
       Args.hasFlag(OPT_enable_large_loadable_types_reg2mem,
                    OPT_disable_large_loadable_types_reg2mem,
@@ -3670,6 +3707,7 @@ bool CompilerInvocation::parseArgs(
     IRGenOpts.DisableLegacyTypeInfo = true;
     IRGenOpts.ReflectionMetadata = ReflectionMetadataMode::None;
     IRGenOpts.EnableReflectionNames = false;
+    FrontendOpts.DisableBuildingInterface = true;
     TypeCheckerOpts.SkipFunctionBodies = FunctionBodySkipping::None;
     SILOpts.SkipFunctionBodies = FunctionBodySkipping::None;
     SILOpts.CMOMode = CrossModuleOptimizationMode::Everything;

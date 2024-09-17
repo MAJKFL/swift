@@ -325,6 +325,7 @@ static void bindElementSignatureRequirementsAtIndex(
         case GenericRequirement::Kind::Shape:
         case GenericRequirement::Kind::Metadata:
         case GenericRequirement::Kind::WitnessTable:
+        case GenericRequirement::Kind::Value:
           break;
         case GenericRequirement::Kind::MetadataPack: {
           auto ty = requirement.getTypeParameter();
@@ -1040,7 +1041,7 @@ void irgen::bindOpenedElementArchetypesAtIndex(IRGenFunction &IGF,
     openablePackParams.insert(genericParam->getCanonicalType());
   });
 
-  auto subs = environment->getPackElementContextSubstitutions();
+  auto subs = environment->getOuterSubstitutions();
 
   // Find the archetypes and conformances which must be bound.
   llvm::SmallSetVector<CanType, 2> types;
@@ -1080,6 +1081,7 @@ void irgen::bindOpenedElementArchetypesAtIndex(IRGenFunction &IGF,
         case GenericRequirement::Kind::Shape:
         case GenericRequirement::Kind::Metadata:
         case GenericRequirement::Kind::WitnessTable:
+        case GenericRequirement::Kind::Value:
           break;
         }
       });

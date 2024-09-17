@@ -1744,7 +1744,8 @@ public:
               "Caller's generic param list.");
       if (auto localA = getLocalArchetypeOf(A)) {
         auto *openingInst =
-            F->getModule().getRootLocalArchetypeDefInst(localA.getRoot(), F);
+            F->getModule().getLocalGenericEnvironmentDefInst(
+                localA->getGenericEnvironment(), F);
         require(I == nullptr || openingInst == I ||
                     properlyDominates(openingInst, I),
                 "Use of a local archetype should be dominated by a "
@@ -1893,12 +1894,10 @@ public:
         require(isArchetypeValidInFunction(A, AI->getFunction()),
                 "Archetype to be substituted must be valid in function.");
 
-        const auto root = A.getRoot();
-
         // Check that opened archetypes are properly tracked inside
         // the current function.
-        auto *openingInst = F.getModule().getRootLocalArchetypeDefInst(
-            root, AI->getFunction());
+        auto *openingInst = F.getModule().getLocalGenericEnvironmentDefInst(
+            A->getGenericEnvironment(), AI->getFunction());
         require(openingInst,
                 "Root opened archetype should be registered in SILModule");
         require(openingInst == AI || properlyDominates(openingInst, AI),
@@ -1944,8 +1943,8 @@ public:
                 "archetype from the substitutions list");
 
         bool matchedDependencyResult = false;
-        DI->forEachDefinedLocalArchetype(
-            [&](CanLocalArchetypeType archetype, SILValue dependency) {
+        DI->forEachDefinedLocalEnvironment(
+            [&](GenericEnvironment *genericEnv, SILValue dependency) {
           if (dependency == V)
             matchedDependencyResult = true;
         });
@@ -3532,8 +3531,7 @@ public:
     if (auto *AEBI = dyn_cast<AllocExistentialBoxInst>(PEBI->getOperand())) {
       // The lowered type must be the properly-abstracted form of the AST type.
       SILType exType = AEBI->getExistentialType();
-      auto archetype = OpenedArchetypeType::get(exType.getASTType(),
-                                                F.getGenericSignature());
+      auto archetype = OpenedArchetypeType::get(exType.getASTType());
 
       auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
                                         AEBI->getFormalConcreteType())
@@ -4607,8 +4605,7 @@ public:
             "existential type");
     
     // The lowered type must be the properly-abstracted form of the AST type.
-    auto archetype = OpenedArchetypeType::get(exType.getASTType(),
-                                              F.getGenericSignature());
+    auto archetype = OpenedArchetypeType::get(exType.getASTType());
 
     auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
                                       AEI->getFormalConcreteType())
@@ -4637,8 +4634,7 @@ public:
             "init_existential_value result must not be an address");
     // The operand must be at the right abstraction level for the existential.
     SILType exType = IEI->getType();
-    auto archetype = OpenedArchetypeType::get(exType.getASTType(),
-                                              F.getGenericSignature());
+    auto archetype = OpenedArchetypeType::get(exType.getASTType());
     auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
                                       IEI->getFormalConcreteType());
     requireSameType(
@@ -4670,8 +4666,7 @@ public:
     
     // The operand must be at the right abstraction level for the existential.
     SILType exType = IEI->getType();
-    auto archetype = OpenedArchetypeType::get(exType.getASTType(),
-                                              F.getGenericSignature());
+    auto archetype = OpenedArchetypeType::get(exType.getASTType());
     auto loweredTy = F.getLoweredType(Lowering::AbstractionPattern(archetype),
                                       IEI->getFormalConcreteType());
     requireSameType(concreteType, loweredTy,
@@ -4857,8 +4852,8 @@ public:
     Ty.visit([&](CanType t) {
       SILValue Def;
       if (const auto archetypeTy = dyn_cast<LocalArchetypeType>(t)) {
-        Def = I->getModule().getRootLocalArchetypeDefInst(
-            archetypeTy.getRoot(), I->getFunction());
+        Def = I->getModule().getLocalGenericEnvironmentDefInst(
+            archetypeTy->getGenericEnvironment(), I->getFunction());
         require(Def, "Root opened archetype should be registered in SILModule");
       } else if (t->hasDynamicSelfType()) {
         require(I->getFunction()->hasSelfParam() ||
@@ -6166,28 +6161,29 @@ public:
   llvm::DenseMap<CanType, CanPackType>
   collectOpenedElementArchetypeBindings(CanType type,
                                         AnyPackIndexInst *indexedBy) {
+    llvm::DenseSet<GenericEnvironment *> visited;
     llvm::DenseMap<CanType, CanPackType> result;
 
     type.visit([&](CanType type) {
       auto opened = dyn_cast<ElementArchetypeType>(type);
       if (!opened) return;
-      opened = opened.getRoot();
+
+      auto *genericEnv = opened->getGenericEnvironment();
 
       // Don't repeat this work if the same archetype is named twice.
-      if (result.count(opened)) return;
+      if (!visited.insert(genericEnv).second) return;
 
       // Ignore archetypes defined by open_pack_elements not based on the
       // same pack_index instruction.
       auto openingInst =
-        F.getModule().getRootLocalArchetypeDef(opened,
+        F.getModule().getLocalGenericEnvironmentDef(genericEnv,
                                                const_cast<SILFunction*>(&F));
       auto opi = dyn_cast<OpenPackElementInst>(openingInst);
       if (!opi || opi->getIndexOperand() != indexedBy) return;
 
       // Map each root opened element archetype to its pack substitution.
       // FIXME: remember conformances?
-      auto openedEnv = opi->getOpenedGenericEnvironment();
-      openedEnv->forEachPackElementBinding(
+      genericEnv->forEachPackElementBinding(
           [&](ElementArchetypeType *elementArchetype, PackType *substitution) {
         auto subPack = cast<PackType>(substitution->getCanonicalType());
         result.insert({elementArchetype->getCanonicalType(), subPack});
@@ -6285,10 +6281,13 @@ public:
         auto archetype = dyn_cast<ElementArchetypeType>(type);
         if (!archetype)
           return type;
-        if (!archetype->isRoot())
-          return Type();
 
-        auto it = allOpened.find(type->getCanonicalType());
+        auto *genericEnv = archetype->getGenericEnvironment();
+        auto interfaceTy = archetype->getInterfaceType();
+
+        auto root = genericEnv->mapTypeIntoContext(
+            interfaceTy->getRootGenericParam())->castTo<ElementArchetypeType>();
+        auto it = allOpened.find(root->getCanonicalType());
         assert(it != allOpened.end());
 
         auto pack = it->second;
@@ -6299,7 +6298,13 @@ public:
         } else {
           assert(!indexedShape && "pack substitution doesn't match in shape");
         }
-        return packElementType;
+
+        if (interfaceTy->is<GenericTypeParamType>())
+          return packElementType;
+
+        return interfaceTy->castTo<DependentMemberType>()
+            ->substRootParam(packElementType, LookUpConformanceInModule(),
+                             std::nullopt);
       };
 
       // If the pack components and expected element types are SIL types,
@@ -6314,7 +6319,9 @@ public:
                                      substTypes,
                                      LookUpConformanceInModule(),
                                      CanGenericSignature(),
-                                     SubstFlags::PreservePackExpansionLevel);
+                                     SubstFlags::PreservePackExpansionLevel |
+                                     SubstFlags::SubstitutePrimaryArchetypes |
+                                     SubstFlags::SubstituteLocalArchetypes);
         requireSameType(indexedElementSILType, substTargetElementSILType,
                         "lanewise-substituted pack element type didn't "
                         "match expected element type");

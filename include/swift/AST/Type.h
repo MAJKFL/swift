@@ -117,20 +117,22 @@ public:
   
 /// Flags that can be passed when substituting into a type.
 enum class SubstFlags {
-  /// Allow substitutions to recurse into SILFunctionTypes.
-  /// Normally, SILType::subst() should be used for lowered
-  /// types, however in special cases where the substitution
-  /// is just changing between contextual and interface type
-  /// representations, using Type::subst() is allowed.
-  AllowLoweredTypes = 0x01,
   /// Map member types to their desugared witness type.
-  DesugarMemberTypes = 0x02,
-  /// Substitute types involving opaque type archetypes.
+  DesugarMemberTypes = 0x01,
+  /// Allow primary archetypes to themselves be the subject of substitution.
+  /// Otherwise, we map them out of context first.
+  SubstitutePrimaryArchetypes = 0x02,
+  /// Allow opaque archetypes to themselves be the subject of substitution,
+  /// used when erasing them to their underlying types. Otherwise, we
+  /// recursively substitute their substitutions, instead, preserving the
+  /// opaque archetype.
   SubstituteOpaqueArchetypes = 0x04,
+  /// Allow local archetypes to themselves be the subject of substitution.
+  SubstituteLocalArchetypes = 0x08,
   /// Don't increase pack expansion level for free pack references.
   /// Do not introduce new usages of this flag.
   /// FIXME: Remove this.
-  PreservePackExpansionLevel = 0x08,
+  PreservePackExpansionLevel = 0x10,
 };
 
 /// Options for performing substitutions into a type.
@@ -328,7 +330,9 @@ public:
   /// subsystem.
   Type subst(InFlightSubstitution &subs) const;
 
-  bool isPrivateStdlibType(bool treatNonBuiltinProtocolsAsPublic = true) const;
+  /// Whether this type is from a system module and should be considered
+  /// implicitly private.
+  bool isPrivateSystemType(bool treatNonBuiltinProtocolsAsPublic = true) const;
 
   SWIFT_DEBUG_DUMP;
   void dump(raw_ostream &os, unsigned indent = 0) const;

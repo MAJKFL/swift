@@ -56,6 +56,7 @@
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/TypeCheckRequests.h"
+#include "swift/Basic/APIntMap.h"
 #include "swift/Basic/Assertions.h"
 #include "swift/Basic/Compiler.h"
 #include "swift/Basic/SourceManager.h"
@@ -275,6 +276,10 @@ struct ASTContext::Implementation {
   /// DenseMap.
   llvm::MapVector<Identifier, ModuleDecl *> LoadedModules;
 
+  /// The map from a module's name to a vector of modules that share that name.
+  /// The name can be either the module's real name of the module's ABI name.
+  llvm::DenseMap<Identifier, llvm::SmallVector<ModuleDecl *, 1>> NameToModules;
+
   // FIXME: This is a StringMap rather than a StringSet because StringSet
   // doesn't allow passing in a pre-existing allocator.
   llvm::StringMap<Identifier::Aligner, llvm::BumpPtrAllocator&>
@@ -457,10 +462,6 @@ struct ASTContext::Implementation {
   /// The single-parameter generic signature with no constraints, <T>.
   CanGenericSignature SingleGenericParameterSignature;
 
-  /// The existential signature <T : P> for each P.
-  llvm::DenseMap<std::pair<CanType, const GenericSignatureImpl *>, CanGenericSignature>
-      ExistentialSignatures;
-
   /// The element signature for a generic signature, which contains a clone
   /// of the context generic signature with new type parameters and requirements
   /// for opened pack elements in the given shape equivalence class.
@@ -520,6 +521,8 @@ struct ASTContext::Implementation {
                MetatypeRepresentation::Last_MetatypeRepresentation) + 1,
                "Use std::pair for MetatypeTypes and ExistentialMetatypeTypes.");
 
+    using OpenedExistentialKey = std::pair<SubstitutionMap, UUID>;
+
     llvm::DenseMap<Type, ErrorType *> ErrorTypesWithOriginal;
     llvm::FoldingSet<TypeAliasType> TypeAliasTypes;
     llvm::FoldingSet<TupleType> TupleTypes;
@@ -555,6 +558,11 @@ struct ASTContext::Implementation {
     llvm::FoldingSet<LayoutConstraintInfo> LayoutConstraints;
     llvm::DenseMap<std::pair<OpaqueTypeDecl *, SubstitutionMap>,
                    GenericEnvironment *> OpaqueArchetypeEnvironments;
+
+    llvm::DenseMap<CanType,
+                   OpenedExistentialSignature> ExistentialSignatures;
+    llvm::DenseMap<OpenedExistentialKey,
+                   GenericEnvironment *> OpenedExistentialEnvironments;
 
     /// The set of function types.
     llvm::FoldingSet<FunctionType> FunctionTypes;
@@ -607,18 +615,17 @@ struct ASTContext::Implementation {
   };
 
   llvm::DenseMap<ModuleDecl*, ModuleType*> ModuleTypes;
-  llvm::DenseMap<std::pair<unsigned, unsigned>, GenericTypeParamType *>
-    GenericParamTypes;
+  llvm::FoldingSet<GenericTypeParamType> GenericParamTypes;
   llvm::FoldingSet<GenericFunctionType> GenericFunctionTypes;
   llvm::FoldingSet<SILFunctionType> SILFunctionTypes;
   llvm::FoldingSet<SILPackType> SILPackTypes;
   llvm::DenseMap<CanType, SILBlockStorageType *> SILBlockStorageTypes;
   llvm::DenseMap<CanType, SILMoveOnlyWrappedType *> SILMoveOnlyWrappedTypes;
   llvm::FoldingSet<SILBoxType> SILBoxTypes;
-  llvm::DenseMap<BuiltinIntegerWidth, BuiltinIntegerType*> IntegerTypes;
+  llvm::FoldingSet<IntegerType> IntegerTypes;
+  llvm::DenseMap<BuiltinIntegerWidth, BuiltinIntegerType*> BuiltinIntegerTypes;
   llvm::FoldingSet<BuiltinVectorType> BuiltinVectorTypes;
   llvm::FoldingSet<DeclName::CompoundDeclName> CompoundNames;
-  llvm::DenseMap<UUID, GenericEnvironment *> OpenedExistentialEnvironments;
   llvm::DenseMap<UUID, GenericEnvironment *> OpenedElementEnvironments;
   llvm::FoldingSet<IndexSubset> IndexSubsets;
   llvm::FoldingSet<AutoDiffDerivativeFunctionIdentifier>
@@ -836,6 +843,7 @@ void ASTContext::Implementation::dump(llvm::raw_ostream &os) const {
                                 << llvm::capacity_in_bytes(Name) << "\n"
 
   SIZE(LoadedModules);
+  SIZE(NameToModules);
   SIZE(IdentifierTable);
   SIZE(Cleanups);
   SIZE_AND_BYTES(ModuleLoaders);
@@ -845,7 +853,6 @@ void ASTContext::Implementation::dump(llvm::raw_ostream &os) const {
   SIZE_AND_BYTES(AssociativityCache);
   SIZE_AND_BYTES(DelayedConformanceDiags);
   SIZE_AND_BYTES(LazyContexts);
-  SIZE_AND_BYTES(ExistentialSignatures);
   SIZE_AND_BYTES(ElementSignatures);
   SIZE_AND_BYTES(Overrides);
   SIZE_AND_BYTES(DefaultWitnesses);
@@ -859,11 +866,9 @@ void ASTContext::Implementation::dump(llvm::raw_ostream &os) const {
   SIZE_AND_BYTES(NextMacroDiscriminator);
   SIZE_AND_BYTES(NextDiscriminator);
   SIZE_AND_BYTES(ModuleTypes);
-  SIZE_AND_BYTES(GenericParamTypes);
   SIZE_AND_BYTES(SILBlockStorageTypes);
   SIZE_AND_BYTES(SILMoveOnlyWrappedTypes);
-  SIZE_AND_BYTES(IntegerTypes);
-  SIZE_AND_BYTES(OpenedExistentialEnvironments);
+  SIZE_AND_BYTES(BuiltinIntegerTypes);
   SIZE_AND_BYTES(OpenedElementEnvironments);
   SIZE_AND_BYTES(ForeignRepresentableCache);
   SIZE(SearchPathsSet);
@@ -1419,6 +1424,7 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   case KnownProtocolKind::CxxPair:
   case KnownProtocolKind::CxxOptional:
   case KnownProtocolKind::CxxRandomAccessCollection:
+  case KnownProtocolKind::CxxMutableRandomAccessCollection:
   case KnownProtocolKind::CxxSet:
   case KnownProtocolKind::CxxSequence:
   case KnownProtocolKind::CxxUniqueSet:
@@ -2321,10 +2327,61 @@ void ASTContext::addLoadedModule(ModuleDecl *M) {
   // and a source file has 'import Foo', a module called Bar (real name)
   // will be loaded and added to the map.
   getImpl().LoadedModules[M->getRealName()] = M;
+
+  // Add the module to the mapping from module name to list of modules that
+  // share that name.
+  getImpl().NameToModules[M->getRealName()].push_back(M);
+
+  // If the ABI name differs from the real name, also add the module to the list
+  // that share that ABI name.
+  if (M->getRealName() != M->getABIName())
+    getImpl().NameToModules[M->getABIName()].push_back(M);
 }
 
 void ASTContext::removeLoadedModule(Identifier RealName) {
+  // First remove the module from the mappings of names to modules.
+  if (ModuleDecl *M = getLoadedModule(RealName)) {
+    auto eraseModule = [&](ModuleDecl *module) {
+      return module->getRealName() == RealName;
+    };
+    auto &vector = getImpl().NameToModules[M->getRealName()];
+    llvm::erase_if(vector, eraseModule);
+    if (M->getRealName() != M->getABIName()) {
+      auto &vector = getImpl().NameToModules[M->getABIName()];
+      llvm::erase_if(vector, eraseModule);
+    }
+  }
+
   getImpl().LoadedModules.erase(RealName);
+}
+
+void ASTContext::moduleABINameWillChange(ModuleDecl *module,
+                                         Identifier newName) {
+  auto it = llvm::find_if(getLoadedModules(),
+                          [&](auto pair) { return pair.second == module; });
+
+  // If this module isn't in the loaded modules list (perhaps because there is
+  // no memory cache) theere's nothing to do.
+  if (it == getLoadedModules().end())
+    return;
+
+  // If the names are the same there's nothing to do.
+  if (module->getABIName() == newName)
+    return;
+
+  // If the real and ABI names are different, ASTContext needs to remove the
+  // module from the mapping whose key is the old ABI name.
+  if (module->getRealName() != module->getABIName()) {
+    auto &vector = getImpl().NameToModules[module->getABIName()];
+    llvm::erase_if(vector,
+                   [&](ModuleDecl *current) { return module == current; });
+  }
+
+  // Now add the module to the vector that's mapped from the new name, if it's
+  // not there already.
+  auto &vector = getImpl().NameToModules[newName];
+  if (llvm::find(vector, module) == vector.end())
+    vector.push_back(module);
 }
 
 void ASTContext::setIgnoreAdjacentModules(bool value) {
@@ -2713,12 +2770,21 @@ ModuleDecl *ASTContext::getModuleByIdentifier(Identifier ModuleID) {
   return getModule(builder.get());
 }
 
-ModuleDecl *ASTContext::getLoadedModuleByABIName(StringRef ModuleName) {
-  for (auto &[_, module] : getLoadedModules()) {
-    if (ModuleName == module->getABIName().str())
-      return module;
-  }
-  return nullptr;
+llvm::ArrayRef<ModuleDecl *>
+ASTContext::getModulesByRealOrABIName(StringRef ModuleName) {
+  auto Identifier = getIdentifier(ModuleName);
+  auto it = getImpl().NameToModules.find(Identifier);
+  if (it != getImpl().NameToModules.end())
+    return it->second;
+
+  // If we didn't find the module it might have not been loaded yet, try
+  // triggering a module load and searching again.
+  getModuleByName(ModuleName);
+  it = getImpl().NameToModules.find(Identifier);
+  if (it != getImpl().NameToModules.end())
+    return it->second;
+
+  return {};
 }
 
 ModuleDecl *ASTContext::getStdlibModule(bool loadIfAbsent) {
@@ -3116,16 +3182,16 @@ size_t ASTContext::getTotalMemory() const {
     getImpl().Cleanups.capacity() +
     llvm::capacity_in_bytes(getImpl().ModuleLoaders) +
     llvm::capacity_in_bytes(getImpl().ModuleTypes) +
-    llvm::capacity_in_bytes(getImpl().GenericParamTypes) +
+    // getImpl().GenericParamTypes ?
     // getImpl().GenericFunctionTypes ?
     // getImpl().SILFunctionTypes ?
     llvm::capacity_in_bytes(getImpl().SILBlockStorageTypes) +
-    llvm::capacity_in_bytes(getImpl().IntegerTypes) +
+    llvm::capacity_in_bytes(getImpl().BuiltinIntegerTypes) +
     // getImpl().ProtocolCompositionTypes ?
     // getImpl().BuiltinVectorTypes ?
     // getImpl().GenericSignatures ?
     // getImpl().CompoundNames ?
-    getImpl().OpenedExistentialEnvironments.getMemorySize() +
+    // getImpl().IntegerTypes ?
     getImpl().Permanent.getTotalMemory();
 
     Size += getSolverMemory();
@@ -3162,7 +3228,9 @@ size_t ASTContext::Implementation::Arena::getTotalMemory() const {
     llvm::capacity_in_bytes(StructTypes) +
     llvm::capacity_in_bytes(ClassTypes) +
     llvm::capacity_in_bytes(ProtocolTypes) +
-    llvm::capacity_in_bytes(DynamicSelfTypes);
+    llvm::capacity_in_bytes(DynamicSelfTypes) +
+    OpaqueArchetypeEnvironments.getMemorySize() +
+    OpenedExistentialEnvironments.getMemorySize();
     // FunctionTypes ?
     // UnboundGenericTypes ?
     // BoundGenericTypes ?
@@ -3209,6 +3277,7 @@ void ASTContext::Implementation::Arena::dump(llvm::raw_ostream &os) const {
     SIZE(ParameterizedProtocolTypes);
     SIZE(LayoutConstraints);
     SIZE_AND_BYTES(OpaqueArchetypeEnvironments);
+    SIZE_AND_BYTES(OpenedExistentialEnvironments);
     SIZE(FunctionTypes);
     SIZE(NormalConformances);
     SIZE(SelfConformances);
@@ -3318,9 +3387,7 @@ TypeAliasType *TypeAliasType::get(TypeAliasDecl *typealias, Type parent,
   auto properties = underlying->getRecursiveProperties();
   if (parent)
     properties |= parent->getRecursiveProperties();
-
-  for (auto substGP : substitutions.getReplacementTypes())
-    properties |= substGP->getRecursiveProperties();
+  properties |= substitutions.getRecursiveProperties();
 
   // Figure out which arena this type will go into.
   auto &ctx = underlying->getASTContext();
@@ -3462,10 +3529,28 @@ Type PlaceholderType::get(ASTContext &ctx, Originator originator) {
   return entry;
 }
 
+IntegerType *IntegerType::get(StringRef value, bool isNegative,
+                              const ASTContext &ctx) {
+  llvm::FoldingSetNodeID id;
+  IntegerType::Profile(id, value, isNegative);
+
+  void *insertPos;
+  if (auto intType = ctx.getImpl().IntegerTypes.FindNodeOrInsertPos(id, insertPos))
+    return intType;
+
+  auto strCopy = ctx.AllocateCopy(value);
+
+  auto intType = new (ctx, AllocationArena::Permanent)
+      IntegerType(strCopy, isNegative, ctx);
+
+  ctx.getImpl().IntegerTypes.InsertNode(intType, insertPos);
+  return intType;
+}
+
 BuiltinIntegerType *BuiltinIntegerType::get(BuiltinIntegerWidth BitWidth,
                                             const ASTContext &C) {
   assert(!BitWidth.isArbitraryWidth());
-  BuiltinIntegerType *&Result = C.getImpl().IntegerTypes[BitWidth];
+  BuiltinIntegerType *&Result = C.getImpl().BuiltinIntegerTypes[BitWidth];
   if (Result == nullptr)
     Result = new (C, AllocationArena::Permanent) BuiltinIntegerType(BitWidth,C);
   return Result;
@@ -3897,7 +3982,9 @@ get(GenericTypeDecl *TheDecl, Type Parent, const ASTContext &C) {
   UnboundGenericType::Profile(ID, TheDecl, Parent);
   void *InsertPos = nullptr;
   RecursiveTypeProperties properties;
+  if (TheDecl->isUnsafe()) properties |= RecursiveTypeProperties::IsUnsafe;
   if (Parent) properties |= Parent->getRecursiveProperties();
+
   auto arena = getArena(properties);
 
   if (auto unbound = C.getImpl().getArena(arena).UnboundGenericTypes
@@ -3948,6 +4035,7 @@ BoundGenericType *BoundGenericType::get(NominalTypeDecl *TheDecl,
   llvm::FoldingSetNodeID ID;
   BoundGenericType::Profile(ID, TheDecl, Parent, GenericArgs);
   RecursiveTypeProperties properties;
+  if (TheDecl->isUnsafe()) properties |= RecursiveTypeProperties::IsUnsafe;
   if (Parent) properties |= Parent->getRecursiveProperties();
   for (Type Arg : GenericArgs) {
     properties |= Arg->getRecursiveProperties();
@@ -4029,6 +4117,7 @@ EnumType::EnumType(EnumDecl *TheDecl, Type Parent, const ASTContext &C,
 
 EnumType *EnumType::get(EnumDecl *D, Type Parent, const ASTContext &C) {
   RecursiveTypeProperties properties;
+  if (D->isUnsafe()) properties |= RecursiveTypeProperties::IsUnsafe;
   if (Parent) properties |= Parent->getRecursiveProperties();
   auto arena = getArena(properties);
 
@@ -4045,6 +4134,7 @@ StructType::StructType(StructDecl *TheDecl, Type Parent, const ASTContext &C,
 
 StructType *StructType::get(StructDecl *D, Type Parent, const ASTContext &C) {
   RecursiveTypeProperties properties;
+  if (D->isUnsafe()) properties |= RecursiveTypeProperties::IsUnsafe;
   if (Parent) properties |= Parent->getRecursiveProperties();
   auto arena = getArena(properties);
 
@@ -4061,6 +4151,7 @@ ClassType::ClassType(ClassDecl *TheDecl, Type Parent, const ASTContext &C,
 
 ClassType *ClassType::get(ClassDecl *D, Type Parent, const ASTContext &C) {
   RecursiveTypeProperties properties;
+  if (D->isUnsafe()) properties |= RecursiveTypeProperties::IsUnsafe;
   if (Parent) properties |= Parent->getRecursiveProperties();
   auto arena = getArena(properties);
 
@@ -4325,20 +4416,39 @@ isAnyFunctionTypeCanonical(ArrayRef<AnyFunctionType::Param> params,
 // always materializable.
 static RecursiveTypeProperties
 getGenericFunctionRecursiveProperties(ArrayRef<AnyFunctionType::Param> params,
-                                      Type result) {
-  static_assert(RecursiveTypeProperties::BitWidth == 18,
+                                      Type result, Type globalActor,
+                                      Type thrownError) {
+  static_assert(RecursiveTypeProperties::BitWidth == 19,
                 "revisit this if you add new recursive type properties");
   RecursiveTypeProperties properties;
 
   for (auto param : params) {
     if (param.getPlainType()->getRecursiveProperties().hasError())
       properties |= RecursiveTypeProperties::HasError;
+    if (param.getPlainType()->getRecursiveProperties().isUnsafe())
+      properties |= RecursiveTypeProperties::IsUnsafe;
   }
 
   if (result->getRecursiveProperties().hasDynamicSelf())
     properties |= RecursiveTypeProperties::HasDynamicSelf;
   if (result->getRecursiveProperties().hasError())
     properties |= RecursiveTypeProperties::HasError;
+  if (result->getRecursiveProperties().isUnsafe())
+    properties |= RecursiveTypeProperties::IsUnsafe;
+  
+  if (globalActor) {
+    if (globalActor->getRecursiveProperties().hasError())
+      properties |= RecursiveTypeProperties::HasError;
+    if (globalActor->getRecursiveProperties().isUnsafe())
+      properties |= RecursiveTypeProperties::IsUnsafe;
+  }
+
+  if (thrownError) {
+    if (thrownError->getRecursiveProperties().hasError())
+      properties |= RecursiveTypeProperties::HasError;
+    if (thrownError->getRecursiveProperties().isUnsafe())
+      properties |= RecursiveTypeProperties::IsUnsafe;
+  }
 
   return properties;
 }
@@ -4671,7 +4781,8 @@ GenericFunctionType *GenericFunctionType::get(GenericSignature sig,
       hasLifetimeDependenceInfo ? numLifetimeDependencies : 0);
   void *mem = ctx.Allocate(allocSize, alignof(GenericFunctionType));
 
-  auto properties = getGenericFunctionRecursiveProperties(params, result);
+  auto properties = getGenericFunctionRecursiveProperties(
+      params, result, globalActor, thrownError);
   auto funcTy = new (mem) GenericFunctionType(sig, params, result, info,
                                               isCanonical ? &ctx : nullptr,
                                               properties);
@@ -4709,22 +4820,83 @@ GenericFunctionType::GenericFunctionType(
   }
 }
 
-GenericTypeParamType *GenericTypeParamType::get(bool isParameterPack,
+GenericTypeParamType *GenericTypeParamType::get(Identifier name,
+                                                GenericTypeParamKind paramKind,
                                                 unsigned depth, unsigned index,
+                                                Type valueType,
                                                 const ASTContext &ctx) {
-  const auto depthKey = depth | ((isParameterPack ? 1 : 0) << 30);
-  auto known = ctx.getImpl().GenericParamTypes.find({depthKey, index});
-  if (known != ctx.getImpl().GenericParamTypes.end())
-    return known->second;
+  llvm::FoldingSetNodeID id;
+  GenericTypeParamType::Profile(id, paramKind, depth, index, valueType,
+                                name);
+
+  void *insertPos;
+  if (auto gpTy = ctx.getImpl().GenericParamTypes.FindNodeOrInsertPos(id, insertPos))
+    return gpTy;
 
   RecursiveTypeProperties props = RecursiveTypeProperties::HasTypeParameter;
-  if (isParameterPack)
+  if (paramKind == GenericTypeParamKind::Pack)
+    props |= RecursiveTypeProperties::HasParameterPack;
+
+  auto canType = GenericTypeParamType::get(paramKind, depth, index, valueType,
+                                           ctx);
+
+  auto result = new (ctx, AllocationArena::Permanent)
+      GenericTypeParamType(name, canType, ctx);
+  ctx.getImpl().GenericParamTypes.InsertNode(result, insertPos);
+  return result;
+}
+
+GenericTypeParamType *GenericTypeParamType::get(GenericTypeParamDecl *param) {
+  RecursiveTypeProperties props = RecursiveTypeProperties::HasTypeParameter;
+  if (param->isParameterPack())
+    props |= RecursiveTypeProperties::HasParameterPack;
+
+  return new (param->getASTContext(), AllocationArena::Permanent)
+      GenericTypeParamType(param, props);
+}
+
+GenericTypeParamType *GenericTypeParamType::get(GenericTypeParamKind paramKind,
+                                                unsigned depth, unsigned index,
+                                                Type valueType,
+                                                const ASTContext &ctx) {
+  llvm::FoldingSetNodeID id;
+  GenericTypeParamType::Profile(id, paramKind, depth, index, valueType,
+                                Identifier());
+
+  void *insertPos;
+  if (auto gpTy = ctx.getImpl().GenericParamTypes.FindNodeOrInsertPos(id, insertPos))
+    return gpTy;
+
+  RecursiveTypeProperties props = RecursiveTypeProperties::HasTypeParameter;
+  if (paramKind == GenericTypeParamKind::Pack)
     props |= RecursiveTypeProperties::HasParameterPack;
 
   auto result = new (ctx, AllocationArena::Permanent)
-      GenericTypeParamType(isParameterPack, depth, index, props, ctx);
-  ctx.getImpl().GenericParamTypes[{depthKey, index}] = result;
+      GenericTypeParamType(paramKind, depth, index, valueType, props, ctx);
+  ctx.getImpl().GenericParamTypes.InsertNode(result, insertPos);
   return result;
+}
+
+GenericTypeParamType *GenericTypeParamType::getType(unsigned depth,
+                                                    unsigned index,
+                                                    const ASTContext &ctx) {
+  return GenericTypeParamType::get(GenericTypeParamKind::Type, depth, index,
+                                   /*valueType*/ Type(), ctx);
+}
+
+GenericTypeParamType *GenericTypeParamType::getPack(unsigned depth,
+                                                    unsigned index,
+                                                    const ASTContext &ctx) {
+  return GenericTypeParamType::get(GenericTypeParamKind::Pack, depth, index,
+                                   /*valueType*/ Type(), ctx);
+}
+
+GenericTypeParamType *GenericTypeParamType::getValue(unsigned depth,
+                                                     unsigned index,
+                                                     Type valueType,
+                                                     const ASTContext &ctx) {
+  return GenericTypeParamType::get(GenericTypeParamKind::Value, depth, index,
+                                   valueType, ctx);
 }
 
 ArrayRef<GenericTypeParamType *>
@@ -4906,7 +5078,7 @@ SILFunctionType::SILFunctionType(
     }
 
     if (genericSig && patternSubs) {
-      assert(!patternSubs.hasArchetypes()
+      assert(!patternSubs.getRecursiveProperties().hasArchetype()
              && "pattern substitutions should not contain context archetypes");
     }
   }
@@ -5044,7 +5216,7 @@ CanSILFunctionType SILFunctionType::get(
   void *mem = ctx.Allocate(bytes, alignof(SILFunctionType));
 
   RecursiveTypeProperties properties;
-  static_assert(RecursiveTypeProperties::BitWidth == 18,
+  static_assert(RecursiveTypeProperties::BitWidth == 19,
                 "revisit this if you add new recursive type properties");
   for (auto &param : params)
     properties |= param.getInterfaceType()->getRecursiveProperties();
@@ -5063,9 +5235,7 @@ CanSILFunctionType SILFunctionType::get(
   }
 
   auto outerSubs = genericSig ? invocationSubs : patternSubs;
-  for (auto replacement : outerSubs.getReplacementTypes()) {
-    properties |= replacement->getRecursiveProperties();
-  }
+  properties |= outerSubs.getRecursiveProperties();
 
   auto fnType =
       new (mem) SILFunctionType(genericSig, ext, coroutineKind, callee,
@@ -5132,6 +5302,7 @@ OptionalType *OptionalType::get(Type base) {
 ProtocolType *ProtocolType::get(ProtocolDecl *D, Type Parent,
                                 const ASTContext &C) {
   RecursiveTypeProperties properties;
+  if (D->isUnsafe()) properties |= RecursiveTypeProperties::IsUnsafe;
   if (Parent) properties |= Parent->getRecursiveProperties();
   auto arena = getArena(properties);
 
@@ -5248,27 +5419,14 @@ DependentMemberType *DependentMemberType::get(Type base,
   return known;
 }
 
-/// Compute the recursive type properties of an opaque type archetype.
-static RecursiveTypeProperties getOpaqueTypeArchetypeProperties(
-    SubstitutionMap subs) {
-  // An opaque type isn't contextually dependent like other archetypes, so
-  // by itself, it doesn't impose the "Has Archetype" recursive property,
-  // but the substituted types might. A disjoint "Has Opaque Archetype" tracks
-  // the presence of opaque archetypes.
-  RecursiveTypeProperties properties =
-    RecursiveTypeProperties::HasOpaqueArchetype;
-  for (auto type : subs.getReplacementTypes()) {
-    properties |= type->getRecursiveProperties();
-  }
-  return properties;
-}
-
 OpaqueTypeArchetypeType *OpaqueTypeArchetypeType::getNew(
     GenericEnvironment *environment, Type interfaceType,
     ArrayRef<ProtocolDecl *> conformsTo, Type superclass,
     LayoutConstraint layout) {
-  auto properties = getOpaqueTypeArchetypeProperties(
-      environment->getOpaqueSubstitutions());
+  auto properties = archetypeProperties(
+      RecursiveTypeProperties::HasOpaqueArchetype,
+      conformsTo, superclass,
+      environment->getOuterSubstitutions());
   auto arena = getArena(properties);
   auto size = OpaqueTypeArchetypeType::totalSizeToAlloc<
       ProtocolDecl *, Type, LayoutConstraint>(
@@ -5290,69 +5448,57 @@ CanTypeWrapper<OpenedArchetypeType> OpenedArchetypeType::getNew(
     GenericEnvironment *environment, Type interfaceType,
     ArrayRef<ProtocolDecl *> conformsTo, Type superclass,
     LayoutConstraint layout) {
-  // FIXME: It'd be great if all of our callers could submit interface types.
-  // But the constraint solver submits archetypes when e.g. trying to issue
-  // checks against members of existential types.
-  //  assert((!superclass || !superclass->hasArchetype())
-  //         && "superclass must be interface type");
-  auto arena = AllocationArena::Permanent;
-  ASTContext &ctx = interfaceType->getASTContext();
-  void *mem = ctx.Allocate(
-    OpenedArchetypeType::totalSizeToAlloc<ProtocolDecl *,Type,LayoutConstraint>(
+  auto properties = archetypeProperties(
+      RecursiveTypeProperties::HasOpenedExistential, conformsTo, superclass,
+      environment->getOuterSubstitutions());
+  auto arena = getArena(properties);
+  auto size = OpenedArchetypeType::totalSizeToAlloc<
+      ProtocolDecl *, Type, LayoutConstraint>(
       conformsTo.size(),
       superclass ? 1 : 0,
-      layout ? 1 : 0),
-      alignof(OpenedArchetypeType), arena);
+      layout ? 1 : 0);
+
+  ASTContext &ctx = interfaceType->getASTContext();
+  void *mem = ctx.Allocate(size, alignof(OpenedArchetypeType), arena);
 
   return CanOpenedArchetypeType(::new (mem) OpenedArchetypeType(
-      environment, interfaceType, conformsTo, superclass, layout));
-}
-
-CanTypeWrapper<OpenedArchetypeType>
-OpenedArchetypeType::get(CanType existential, GenericSignature parentSig,
-                         std::optional<UUID> knownID) {
-  assert(existential->isExistentialType());
-  auto interfaceType = OpenedArchetypeType::getSelfInterfaceTypeFromContext(
-      parentSig, existential->getASTContext());
-  return get(existential, interfaceType, parentSig, knownID);
+      environment, interfaceType, conformsTo, superclass, layout,
+      properties));
 }
 
 CanOpenedArchetypeType OpenedArchetypeType::get(CanType existential,
-                                                Type interfaceType,
-                                                GenericSignature parentSig,
                                                 std::optional<UUID> knownID) {
-  assert(!interfaceType->hasArchetype() && "must be interface type");
+  auto &ctx = existential->getASTContext();
+  auto existentialSig = ctx.getOpenedExistentialSignature(existential);
 
   if (!knownID)
     knownID = UUID::fromTime();
 
-  auto *genericEnv =
-      GenericEnvironment::forOpenedExistential(existential, parentSig, *knownID);
+  auto *genericEnv = GenericEnvironment::forOpenedExistential(
+      existentialSig.OpenedSig,
+      existentialSig.Shape,
+      existentialSig.Generalization,
+      *knownID);
 
-  // Map the interface type into that environment.
-  auto result = genericEnv->mapTypeIntoContext(interfaceType)
-      ->castTo<OpenedArchetypeType>();
-  return CanOpenedArchetypeType(result);
+  return cast<OpenedArchetypeType>(
+    genericEnv->mapTypeIntoContext(existentialSig.SelfType)
+      ->getCanonicalType());
 }
 
-CanType OpenedArchetypeType::getAny(CanType existential, Type interfaceType,
-                                    GenericSignature parentSig) {
+Type OpenedArchetypeType::getAny(Type existential) {
   assert(existential->isAnyExistentialType());
-  if (auto metatypeTy = existential->getAs<ExistentialMetatypeType>()) {
-    auto instanceTy =
-        metatypeTy->getExistentialInstanceType()->getCanonicalType();
-    return CanMetatypeType::get(
-        OpenedArchetypeType::getAny(instanceTy, interfaceType, parentSig));
-  }
-  assert(existential->isExistentialType());
-  return OpenedArchetypeType::get(existential, interfaceType, parentSig);
-}
 
-CanType OpenedArchetypeType::getAny(CanType existential,
-                                    GenericSignature parentSig) {
-  auto interfaceTy = OpenedArchetypeType::getSelfInterfaceTypeFromContext(
-      parentSig, existential->getASTContext());
-  return getAny(existential, interfaceTy, parentSig);
+  if (auto metatypeTy = existential->getAs<ExistentialMetatypeType>()) {
+    auto instanceTy = metatypeTy->getExistentialInstanceType();
+    auto openedInstanceTy = OpenedArchetypeType::getAny(instanceTy);
+    if (metatypeTy->hasRepresentation()) {
+      return MetatypeType::get(openedInstanceTy,
+                               metatypeTy->getRepresentation());
+    }
+    return MetatypeType::get(openedInstanceTy);
+  }
+
+  return OpenedArchetypeType::get(existential->getCanonicalType());
 }
 
 void SubstitutionMap::Storage::Profile(
@@ -5478,10 +5624,11 @@ GenericEnvironment *GenericEnvironment::forPrimary(GenericSignature signature) {
 
   // Allocate and construct the new environment.
   unsigned numGenericParams = signature.getGenericParams().size();
-  size_t bytes = totalSizeToAlloc<OpaqueEnvironmentData,
+  size_t bytes = totalSizeToAlloc<SubstitutionMap,
+                                  OpaqueEnvironmentData,
                                   OpenedExistentialEnvironmentData,
                                   OpenedElementEnvironmentData, Type>(
-      0, 0, 0, numGenericParams);
+      0, 0, 0, 0, numGenericParams);
   void *mem = ctx.Allocate(bytes, alignof(GenericEnvironment));
   return new (mem) GenericEnvironment(signature);
 }
@@ -5497,7 +5644,8 @@ GenericEnvironment *GenericEnvironment::forOpaqueType(
 
   auto &ctx = opaque->getASTContext();
 
-  auto properties = getOpaqueTypeArchetypeProperties(subs);
+  auto properties = ArchetypeType::archetypeProperties(
+      RecursiveTypeProperties::HasOpaqueArchetype, { }, Type(), subs);
   auto arena = getArena(properties);
   auto &environments
     = ctx.getImpl().getArena(arena).OpaqueArchetypeEnvironments;
@@ -5507,10 +5655,11 @@ GenericEnvironment *GenericEnvironment::forOpaqueType(
     // Allocate and construct the new environment.
     auto signature = opaque->getOpaqueInterfaceGenericSignature();
     unsigned numGenericParams = signature.getGenericParams().size();
-    size_t bytes = totalSizeToAlloc<OpaqueEnvironmentData,
+    size_t bytes = totalSizeToAlloc<SubstitutionMap,
+                                  OpaqueEnvironmentData,
                                     OpenedExistentialEnvironmentData,
                                     OpenedElementEnvironmentData, Type>(
-        1, 0, 0, numGenericParams);
+        1, 1, 0, 0, numGenericParams);
     void *mem = ctx.Allocate(bytes, alignof(GenericEnvironment), arena);
     env = new (mem) GenericEnvironment(signature, opaque, subs);
 
@@ -5522,47 +5671,63 @@ GenericEnvironment *GenericEnvironment::forOpaqueType(
 
 /// Create a new generic environment for an opened archetype.
 GenericEnvironment *
+GenericEnvironment::forOpenedExistential(Type existential, UUID uuid) {
+  auto &ctx = existential->getASTContext();
+  auto existentialSig = ctx.getOpenedExistentialSignature(existential);
+  return forOpenedExistential(existentialSig.OpenedSig,
+                              existentialSig.Shape,
+                              existentialSig.Generalization, uuid);
+}
+
+/// Create a new generic environment for an opened archetype.
+GenericEnvironment *
 GenericEnvironment::forOpenedExistential(
-    Type existential, GenericSignature parentSig, UUID uuid) {
+    GenericSignature signature, Type existential,
+    SubstitutionMap subs, UUID uuid) {
   assert(existential->isExistentialType());
-  // FIXME: Opened archetypes can't be transformed because the
-  // the identity of the archetype has to be preserved. This
-  // means that simplifying an opened archetype in the constraint
-  // system to replace type variables with fixed types is not
-  // yet supported. For now, assert that an opened archetype never
-  // contains type variables to catch cases where type variables
-  // would be applied to the type-checked AST.
-  assert(!existential->hasTypeVariable() &&
-         "opened existentials containing type variables cannot be simplified");
+
+  // TODO: We could attempt to preserve type sugar in the substitution map.
+  // Currently archetypes are assumed to be always canonical in many places,
+  // though, so doing so would require fixing those places.
+  subs = subs.getCanonical();
 
   auto &ctx = existential->getASTContext();
 
-  auto &openedExistentialEnvironments =
-      ctx.getImpl().OpenedExistentialEnvironments;
-  auto found = openedExistentialEnvironments.find(uuid);
+  auto layout = existential->getExistentialLayout();
+  auto properties = ArchetypeType::archetypeProperties(
+      RecursiveTypeProperties::HasOpenedExistential,
+      layout.getProtocols(), layout.getSuperclass(), subs);
 
-  if (found != openedExistentialEnvironments.end()) {
+  auto arena = getArena(properties);
+
+  auto key = std::make_pair(subs, uuid);
+
+  auto &environments =
+      ctx.getImpl().getArena(arena).OpenedExistentialEnvironments;
+  auto found = environments.find(key);
+
+  if (found != environments.end()) {
     auto *existingEnv = found->second;
     assert(existingEnv->getOpenedExistentialType()->isEqual(existential));
-    assert(existingEnv->getOpenedExistentialParentSignature().getPointer() == parentSig.getPointer());
+    assert(existingEnv->getGenericSignature().getPointer() == signature.getPointer());
+    assert(existingEnv->getOuterSubstitutions() == subs);
     assert(existingEnv->getOpenedExistentialUUID() == uuid);
 
     return existingEnv;
   }
 
-  auto signature = ctx.getOpenedExistentialSignature(existential, parentSig);
-
   // Allocate and construct the new environment.
   unsigned numGenericParams = signature.getGenericParams().size();
-  size_t bytes = totalSizeToAlloc<OpaqueEnvironmentData,
+  size_t bytes = totalSizeToAlloc<SubstitutionMap,
+                                  OpaqueEnvironmentData,
                                   OpenedExistentialEnvironmentData,
                                   OpenedElementEnvironmentData, Type>(
-      0, 1, 0, numGenericParams);
+      1, 0, 1, 0, numGenericParams);
   void *mem = ctx.Allocate(bytes, alignof(GenericEnvironment));
   auto *genericEnv =
-      new (mem) GenericEnvironment(signature, existential, parentSig, uuid);
+      new (mem) GenericEnvironment(signature, existential, subs, uuid);
 
-  openedExistentialEnvironments[uuid] = genericEnv;
+  environments[key] = genericEnv;
 
   return genericEnv;
 }
@@ -5591,11 +5756,12 @@ GenericEnvironment::forOpenedElement(GenericSignature signature,
   // Allocate and construct the new environment.
   unsigned numGenericParams = signature.getGenericParams().size();
   unsigned numOpenedParams = signature.getInnermostGenericParams().size();
-  size_t bytes = totalSizeToAlloc<OpaqueEnvironmentData,
+  size_t bytes = totalSizeToAlloc<SubstitutionMap,
+                                  OpaqueEnvironmentData,
                                   OpenedExistentialEnvironmentData,
                                   OpenedElementEnvironmentData,
                                   Type>(
-      0, 0, 1, numGenericParams + numOpenedParams);
+      1, 0, 0, 1, numGenericParams + numOpenedParams);
   void *mem = ctx.Allocate(bytes, alignof(GenericEnvironment));
   auto *genericEnv = new (mem) GenericEnvironment(signature,
                                                   uuid, shapeClass,
@@ -6081,7 +6247,7 @@ GenericParamList *ASTContext::getSelfGenericParamList(DeclContext *dc) const {
   // DeclContext this was called with. Since this is just a giant
   // hack for SIL mode, that should be OK.
   auto *selfParam = GenericTypeParamDecl::createImplicit(
-      dc, Id_Self, /*depth*/ 0, /*index*/ 0);
+      dc, Id_Self, /*depth*/ 0, /*index*/ 0, GenericTypeParamKind::Type);
 
   theParamList = GenericParamList::create(
       const_cast<ASTContext &>(*this), SourceLoc(), {selfParam}, SourceLoc());
@@ -6094,48 +6260,61 @@ CanGenericSignature ASTContext::getSingleGenericParameterSignature() const {
   if (auto theSig = getImpl().SingleGenericParameterSignature)
     return theSig;
 
-  auto param = GenericTypeParamType::get(/*isParameterPack*/ false,
-                                         /*depth*/ 0, /*index*/ 0, *this);
+  auto param = GenericTypeParamType::getType(/*depth*/ 0, /*index*/ 0, *this);
   auto sig = GenericSignature::get(param, { });
   auto canonicalSig = CanGenericSignature(sig);
   getImpl().SingleGenericParameterSignature = canonicalSig;
   return canonicalSig;
 }
 
-Type OpenedArchetypeType::getSelfInterfaceTypeFromContext(GenericSignature parentSig,
-                                                          ASTContext &ctx) {
-  return GenericTypeParamType::get(/*isParameterPack=*/ false,
-                                   parentSig.getNextDepth(), /*index=*/ 0,
-                                   ctx);
-}
-
-CanGenericSignature
-ASTContext::getOpenedExistentialSignature(Type type, GenericSignature parentSig) {
+OpenedExistentialSignature
+ASTContext::getOpenedExistentialSignature(Type type) {
   assert(type->isExistentialType());
 
-  if (auto existential = type->getAs<ExistentialType>())
-    type = existential->getConstraintType();
+  auto canType = type->getCanonicalType();
 
-  const CanType constraint = type->getCanonicalType();
+  // The constraint type might contain type variables.
+  auto properties = canType->getRecursiveProperties();
+  auto arena = getArena(properties);
 
-  auto canParentSig = parentSig.getCanonicalSignature();
-  auto key = std::make_pair(constraint, canParentSig.getPointer());
-  auto found = getImpl().ExistentialSignatures.find(key);
-  if (found != getImpl().ExistentialSignatures.end())
+  // Check the cache.
+  const auto &sigs = getImpl().getArena(arena).ExistentialSignatures;
+  auto found = sigs.find(canType);
+  if (found != sigs.end())
     return found->second;
 
+  OpenedExistentialSignature existentialSig;
+
+  // Generalize the existential type, to move type variables and primary
+  // archetypes into the substitution map.
+  auto gen = ExistentialTypeGeneralization::get(canType);
+
+  existentialSig.Shape = gen.Shape->getCanonicalType();
+  existentialSig.Generalization = gen.Generalization;
+
+  // Now, we have an existential type written with type parameters only.
+  // Open the generalization signature by adding a new generic parameter
+  // for `Self`.
+  auto parentSig = gen.Generalization.getGenericSignature();
+  auto canParentSig = parentSig.getCanonicalSignature();
+
   LocalArchetypeRequirementCollector collector(*this, canParentSig);
-  collector.addOpenedExistential(type);
-  auto genericSig = buildGenericSignature(
+  collector.addOpenedExistential(gen.Shape);
+  existentialSig.OpenedSig = buildGenericSignature(
       *this, collector.OuterSig, collector.Params, collector.Requirements,
       /*allowInverses=*/true).getCanonicalSignature();
 
-  auto result = getImpl().ExistentialSignatures.insert(
-      std::make_pair(key, genericSig));
-  assert(result.second);
-  (void) result;
+  // Stash the `Self` type.
+  existentialSig.SelfType =
+      existentialSig.OpenedSig.getGenericParams().back()
+          ->getCanonicalType();
 
-  return genericSig;
+  // Cache the result.
+  auto result = getImpl().getArena(arena).ExistentialSignatures.insert(
+      std::make_pair(canType, existentialSig));
+  ASSERT(result.second);
+
+  return existentialSig;
 }
 
 CanGenericSignature
@@ -6531,9 +6710,8 @@ bool ASTContext::isASCIIString(StringRef s) const {
 
 clang::DarwinSDKInfo *ASTContext::getDarwinSDKInfo() const {
   if (!getImpl().SDKInfo) {
-    auto SDKInfoOrErr = clang::parseDarwinSDKInfo(
-            *llvm::vfs::getRealFileSystem(),
-            SearchPathOpts.SDKPath);
+    auto SDKInfoOrErr = clang::parseDarwinSDKInfo(*SourceMgr.getFileSystem(),
+                                                  SearchPathOpts.SDKPath);
     if (!SDKInfoOrErr) {
       llvm::handleAllErrors(SDKInfoOrErr.takeError(),
                             [](const llvm::ErrorInfoBase &) {
@@ -6708,4 +6886,8 @@ ValueOwnership swift::asValueOwnership(ParameterOwnership o) {
   case ParameterOwnership::Owned:   return ValueOwnership::Owned;
   }
   llvm_unreachable("exhaustive switch");
+}
+
+StringRef ASTContext::getTargetPlatformStringForDiagnostics() const {
+  return prettyPlatformString(targetPlatform(LangOpts));
 }

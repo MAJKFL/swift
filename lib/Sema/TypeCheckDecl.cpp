@@ -550,7 +550,7 @@ BodyInitKindRequest::evaluate(Evaluator &evaluator,
         myKind = BodyInitKind::Delegating;
       else if (auto *declRef = dyn_cast<UnresolvedDeclRefExpr>(arg)) {
         // FIXME: We can see UnresolvedDeclRefExprs here because we have
-        // not yet run preCheckExpression() on the entire function body
+        // not yet run preCheckTarget() on the entire function body
         // yet.
         //
         // We could consider pre-checking more eagerly.
@@ -718,37 +718,6 @@ ExistentialConformsToSelfRequest::evaluate(Evaluator &evaluator,
   }
 
   return true;
-}
-
-bool HasSelfOrAssociatedTypeRequirementsRequest::evaluate(
-    Evaluator &evaluator, ProtocolDecl *decl) const {
-  // ObjC protocols do not require `any`.
-  if (decl->isObjC())
-    return false;
-
-  for (auto member : decl->getMembers()) {
-    // Existential types require `any` if the protocol has an associated type.
-    if (isa<AssociatedTypeDecl>(member))
-      return true;
-
-    // For value members, look at their type signatures.
-    if (auto valueMember = dyn_cast<ValueDecl>(member)) {
-      const auto info = valueMember->findExistentialSelfReferences(
-          decl->getDeclaredInterfaceType(),
-          /*treatNonResultCovariantSelfAsInvariant=*/false);
-      if (info.selfRef > TypePosition::Covariant || info.assocTypeRef) {
-        return true;
-      }
-    }
-  }
-
-  // Check whether any of the inherited protocols require `any`.
-  for (auto proto : decl->getInheritedProtocols()) {
-    if (proto->hasSelfOrAssociatedTypeRequirements())
-      return true;
-  }
-
-  return false;
 }
 
 ArrayRef<AssociatedTypeDecl *>
@@ -1689,8 +1658,9 @@ SelfAccessKindRequest::evaluate(Evaluator &evaluator, FuncDecl *FD) const {
 }
 
 bool TypeChecker::isAvailabilitySafeForConformance(
-    ProtocolDecl *proto, ValueDecl *requirement, ValueDecl *witness,
-    DeclContext *dc, AvailabilityContext &requirementInfo) {
+    const ProtocolDecl *proto, const ValueDecl *requirement,
+    const ValueDecl *witness, const DeclContext *dc,
+    AvailabilityRange &requirementInfo) {
 
   // We assume conformances in
   // non-SourceFiles have already been checked for availability.
@@ -1711,11 +1681,11 @@ bool TypeChecker::isAvailabilitySafeForConformance(
   // (an over-approximation of) the intersection of the witnesses's available
   // range with both the conforming type's available range and the protocol
   // declaration's available range.
-  AvailabilityContext witnessInfo =
+  AvailabilityRange witnessInfo =
       AvailabilityInference::availableRange(witness, Context);
   requirementInfo = AvailabilityInference::availableRange(requirement, Context);
 
-  AvailabilityContext infoForConformingDecl =
+  AvailabilityRange infoForConformingDecl =
       overApproximateAvailabilityAtLocation(dc->getAsDecl()->getLoc(), dc);
 
   // Relax the requirements for @_spi witnesses by treating the requirement as
@@ -1727,8 +1697,8 @@ bool TypeChecker::isAvailabilitySafeForConformance(
   // compatibility with some existing code and is reasonably safe for the
   // majority of cases.
   if (witness->isSPI()) {
-    AvailabilityContext deploymentTarget =
-        AvailabilityContext::forDeploymentTarget(Context);
+    AvailabilityRange deploymentTarget =
+        AvailabilityRange::forDeploymentTarget(Context);
     requirementInfo.constrainWith(deploymentTarget);
   }
 
@@ -1736,7 +1706,7 @@ bool TypeChecker::isAvailabilitySafeForConformance(
   witnessInfo.constrainWith(infoForConformingDecl);
   requirementInfo.constrainWith(infoForConformingDecl);
 
-  AvailabilityContext infoForProtocolDecl =
+  AvailabilityRange infoForProtocolDecl =
       overApproximateAvailabilityAtLocation(proto->getLoc(), proto);
 
   witnessInfo.constrainWith(infoForProtocolDecl);
@@ -2419,10 +2389,23 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
   case DeclKind::MissingMember:
   case DeclKind::Module:
   case DeclKind::OpaqueType:
-  case DeclKind::GenericTypeParam:
   case DeclKind::MacroExpansion:
     llvm_unreachable("should not get here");
     return Type();
+
+  case DeclKind::GenericTypeParam: {
+    auto *paramDecl = cast<GenericTypeParamDecl>(D);
+
+    // If we haven't set a depth for this generic parameter yet, do so.
+    if (paramDecl->getDepth() == GenericTypeParamDecl::InvalidDepth) {
+      auto *dc = paramDecl->getDeclContext();
+      auto *gpList = dc->getAsDecl()->getAsGenericContext()->getGenericParams();
+      gpList->setDepth(dc->getGenericContextDepth());
+    }
+
+    auto type = GenericTypeParamType::get(paramDecl);
+    return MetatypeType::get(type, Context);
+  }
 
   case DeclKind::AssociatedType: {
     auto assocType = cast<AssociatedTypeDecl>(D);
@@ -3192,4 +3175,23 @@ SourceFile::getIfConfigClausesWithin(SourceRange outer) const {
         return SM.isBeforeInBuffer(loc, range.getStartLoc());
       });
   return llvm::ArrayRef(lower, upper - lower);
+}
+
+//----------------------------------------------------------------------------//
+// IsUnsafeRequest
+//----------------------------------------------------------------------------//
+
+bool IsUnsafeRequest::evaluate(Evaluator &evaluator, Decl *decl) const {
+  // If it's marked @unsafe, it's unsafe.
+  if (decl->getAttrs().hasAttribute<UnsafeAttr>())
+    return true;
+
+  // Inference: A member of an @unsafe type is also unsafe.
+  if (auto enclosingDC = decl->getDeclContext()) {
+    if (auto enclosingNominal = enclosingDC->getSelfNominalTypeDecl())
+      if (enclosingNominal->isUnsafe())
+        return true;
+  }
+
+  return false;
 }

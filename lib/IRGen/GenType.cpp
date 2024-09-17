@@ -970,7 +970,7 @@ namespace {
       : ScalarTypeInfo(ty, Size(0), SpareBitVector{}, Alignment(1),
                        IsTriviallyDestroyable,
                        IsCopyable,
-                       IsFixedSize) {}
+                       IsFixedSize, IsABIAccessible) {}
     unsigned getExplosionSize() const override { return 0; }
     void getSchema(ExplosionSchema &schema) const override {}
     void addToAggLowering(IRGenModule &IGM, SwiftAggLowering &lowering,
@@ -1138,7 +1138,8 @@ namespace {
       : ScalarTypeInfo(storage, size, std::move(spareBits), align,
                        IsTriviallyDestroyable,
                        IsCopyable,
-                       IsFixedSize),
+                       IsFixedSize,
+                       IsABIAccessible),
         ScalarTypes(std::move(scalarTypes))
     {}
     
@@ -1329,7 +1330,7 @@ namespace {
                               IsNotTriviallyDestroyable,
                               IsNotBitwiseTakable,
                               IsNotCopyable,
-                              IsFixedSize) {}
+                              IsFixedSize, IsABIAccessible) {}
   };
 
   /// A TypeInfo implementation for address-only types which can never
@@ -1546,7 +1547,7 @@ TypeConverter::TypeConverter(IRGenModule &IGM)
   // metadata update callback when realizing a Swift class referenced from
   // Objective-C.
   auto deploymentAvailability =
-    AvailabilityContext::forDeploymentTarget(IGM.Context);
+      AvailabilityRange::forDeploymentTarget(IGM.Context);
   bool supportsObjCMetadataUpdateCallback =
     deploymentAvailability.isContainedIn(
         IGM.Context.getObjCMetadataUpdateCallbackAvailability());
@@ -1981,11 +1982,8 @@ ArchetypeType *TypeConverter::getExemplarArchetype(ArchetypeType *t) {
 
   assert(isa<PrimaryArchetypeType>(t) || isa<PackArchetypeType>(t));
 
-  // Get the root archetype.
-  auto root = t->getRoot();
-
   // Retrieve the generic environment of the archetype.
-  auto genericEnv = root->getGenericEnvironment();
+  auto genericEnv = t->getGenericEnvironment();
 
   // Dig out the canonical generic environment.
   auto genericSig = genericEnv->getGenericSignature();
@@ -2018,8 +2016,8 @@ CanType TypeConverter::getExemplarType(CanType contextTy) {
         return type;
       },
       MakeAbstractConformanceForGenericType(),
-      SubstFlags::AllowLoweredTypes |
-      SubstFlags::PreservePackExpansionLevel);
+      SubstFlags::PreservePackExpansionLevel |
+      SubstFlags::SubstitutePrimaryArchetypes);
     return CanType(exemplified);
   }
 }
@@ -2370,6 +2368,8 @@ const TypeInfo *TypeConverter::convertType(CanType ty) {
                      " arbitrary type positions");
   case TypeKind::SILToken:
     llvm_unreachable("should not be asking for representation of a SILToken");
+  case TypeKind::Integer:
+    llvm_unreachable("implement me");
   }
   }
   llvm_unreachable("bad type kind");
@@ -2447,12 +2447,15 @@ namespace {
 
       auto rawLayout = decl->getAttrs().getAttribute<RawLayoutAttr>();
 
-      // If our struct has a raw layout, it may be dependent on the like type.
+      // If our struct has a raw layout, it may be dependent on the like type or
+      // count type.
       if (rawLayout) {
         if (auto likeType = rawLayout->getResolvedScalarLikeType(decl)) {
           return visit((*likeType)->getCanonicalType());
         } else if (auto likeArray = rawLayout->getResolvedArrayLikeTypeAndCount(decl)) {
-          return visit(likeArray->first->getCanonicalType());
+          auto isLikeDependent = visit(likeArray->first->getCanonicalType());
+          auto isCountDependent = visit(likeArray->second->getCanonicalType());
+          return isLikeDependent || isCountDependent;
         }
       }
 
@@ -2544,7 +2547,8 @@ public:
                     IsNotTriviallyDestroyable, /* irrelevant */
                     IsNotBitwiseTakable, /* irrelevant */
                     IsCopyable, /* irrelevant */
-                    IsFixedSize /* irrelevant */),
+                    IsFixedSize /* irrelevant */,
+                    IsABIAccessible),
       NumExtraInhabitants(node.NumExtraInhabitants) {}
 
   TypeLayoutEntry
@@ -2815,11 +2819,10 @@ void IRGenFunction::setDynamicSelfMetadata(CanType selfClass,
 
 #ifndef NDEBUG
 bool TypeConverter::isExemplarArchetype(ArchetypeType *arch) const {
-  auto primary = arch->getRoot();
-  if (!isa<PrimaryArchetypeType>(primary) &&
-      !isa<PackArchetypeType>(primary))
+  if (!isa<PrimaryArchetypeType>(arch) &&
+      !isa<PackArchetypeType>(arch))
     return true;
-  auto genericEnv = primary->getGenericEnvironment();
+  auto genericEnv = arch->getGenericEnvironment();
 
   // Dig out the canonical generic environment.
   auto genericSig = genericEnv->getGenericSignature();
@@ -3041,4 +3044,25 @@ bool irgen::tryEmitDestroyUsingDeinit(IRGenFunction &IGF, Address address,
     },
     // Indirect parameter teardown
     [&]{ /* nothing to do */ });
+}
+
+IsABIAccessible_t irgen::isTypeABIAccessibleIfFixedSize(IRGenModule &IGM,
+                                                        CanType ty) {
+
+  // Copyable types currently are always ABI-accessible if they're fixed size.
+  if (!ty->isNoncopyable())
+    return IsABIAccessible;
+
+  // Check for a deinit. If this type does not define a deinit it is ABI
+  // accessible because we can just project onto its sub elements.
+  auto nom = ty->getAnyNominal();
+  if (!nom || !nom->getValueTypeDestructor())
+    return IsABIAccessible;
+
+  if (IGM.getSILModule().isTypeMetadataAccessible(ty) ||
+      IGM.getSILModule().lookUpMoveOnlyDeinit(nom,
+                                              false /*deserialize lazily*/))
+    return IsABIAccessible;
+
+  return IsNotABIAccessible;
 }

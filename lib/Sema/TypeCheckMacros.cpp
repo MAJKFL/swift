@@ -797,8 +797,7 @@ static std::string expandMacroDefinition(
     if (isExpressionReplacement) {
       auto argExpr = args->getArgExprs()[replacement.parameterIndex];
       SmallString<32> argTextBuffer;
-      auto argText =
-          extractInlinableText(ctx.SourceMgr, argExpr, argTextBuffer);
+      auto argText = extractInlinableText(ctx, argExpr, argTextBuffer);
       expandedResult.append(argText);
     } else {
       auto typeArgType = subs.getReplacementTypes()[replacement.parameterIndex];
@@ -2024,8 +2023,10 @@ ConcreteDeclRef ResolveMacroRequest::evaluate(Evaluator &evaluator,
   } else {
     SourceRange genericArgsRange = macroRef.getGenericArgsRange();
     macroExpansion = MacroExpansionExpr::create(
-      dc, macroRef.getSigilLoc(), macroRef.getMacroName(),
-      macroRef.getMacroNameLoc(), genericArgsRange.Start,
+      dc, macroRef.getSigilLoc(),
+      macroRef.getModuleName(), macroRef.getModuleNameLoc(),
+      macroRef.getMacroName(), macroRef.getMacroNameLoc(),
+      genericArgsRange.Start,
       macroRef.getGenericArgs(), genericArgsRange.End,
       macroRef.getArgs(), roles);
   }

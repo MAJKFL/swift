@@ -1922,6 +1922,15 @@ ImportedModule::removeDuplicates(SmallVectorImpl<ImportedModule> &imports) {
   imports.erase(last, imports.end());
 }
 
+Identifier ModuleDecl::getPublicModuleName(bool onlyIfImported) const {
+  if (!PublicModuleName.empty() &&
+      (!onlyIfImported ||
+       getASTContext().getLoadedModule(PublicModuleName)))
+    return PublicModuleName;
+
+  return getName();
+}
+
 Identifier ModuleDecl::getRealName() const {
   // This will return the real name for an alias (if used) or getName()
   return getASTContext().getRealModuleName(getName());
@@ -1954,6 +1963,11 @@ Identifier ModuleDecl::getABIName() const {
   }
 
   return getName();
+}
+
+void ModuleDecl::setABIName(Identifier name) {
+  getASTContext().moduleABINameWillChange(this, name);
+  ModuleABIName = name;
 }
 
 StringRef ModuleDecl::getModuleFilename() const {
@@ -2931,17 +2945,44 @@ SourceFile::getImportAccessLevel(const ModuleDecl *targetModule) const {
   assert(targetModule != getParentModule() &&
          "getImportAccessLevel doesn't support checking for a self-import");
 
+  /// Order of relevancy of `import` to reach `targetModule`.
+  /// Lower is better/more authoritative.
+  auto rateImport = [&](const ImportAccessLevel import) -> int {
+    auto importedModule = import->module.importedModule;
+
+    // Prioritize public names:
+    if (targetModule->getExportAsName() == importedModule->getBaseIdentifier())
+      return 0;
+    if (targetModule->getPublicModuleName(/*onlyIfImported*/false) ==
+          importedModule->getName())
+      return 1;
+
+    // The defining module or overlay:
+    if (targetModule == importedModule)
+      return 2;
+    if (targetModule == importedModule->getUnderlyingModuleIfOverlay())
+      return 3;
+
+    // Any import in the sources.
+    if (import->importLoc.isValid())
+      return 4;
+
+    return 10;
+  };
+
+  // Find the import with the least restrictive access-level.
+  // Among those prioritize more relevant one.
   auto &imports = getASTContext().getImportCache();
   ImportAccessLevel restrictiveImport = std::nullopt;
-
   for (auto &import : *Imports) {
     if ((!restrictiveImport.has_value() ||
-         import.accessLevel > restrictiveImport->accessLevel) &&
+         import.accessLevel > restrictiveImport->accessLevel ||
+         (import.accessLevel == restrictiveImport->accessLevel &&
+          rateImport(import) < rateImport(restrictiveImport))) &&
         imports.isImportedBy(targetModule, import.module.importedModule)) {
       restrictiveImport = import;
     }
   }
-
   return restrictiveImport;
 }
 
@@ -4009,7 +4050,8 @@ FrontendStatsTracer::getTraceFormatter<const SourceFile *>() {
 bool IsNonUserModuleRequest::evaluate(Evaluator &evaluator, ModuleDecl *mod) const {
   // If there's no SDK path, fallback to checking whether the module was
   // in the system search path or a clang system module
-  SearchPathOptions &searchPathOpts = mod->getASTContext().SearchPathOpts;
+  auto &ctx = mod->getASTContext();
+  SearchPathOptions &searchPathOpts = ctx.SearchPathOpts;
   StringRef sdkPath = searchPathOpts.getSDKPath();
   if (sdkPath.empty() && mod->isSystemModule())
     return true;
@@ -4028,9 +4070,14 @@ bool IsNonUserModuleRequest::evaluate(Evaluator &evaluator, ModuleDecl *mod) con
   if (modulePath.empty())
     return false;
 
+  // If we have a platform path, check against that as it will be a parent of
+  // the SDK path.
+  auto *FS = ctx.SourceMgr.getFileSystem().get();
+  auto sdkOrPlatform = searchPathOpts.getSDKPlatformPath(FS).value_or(sdkPath);
+
   StringRef runtimePath = searchPathOpts.RuntimeResourcePath;
   return (!runtimePath.empty() && pathStartsWith(runtimePath, modulePath)) ||
-      (!sdkPath.empty() && pathStartsWith(sdkPath, modulePath));
+      (!sdkOrPlatform.empty() && pathStartsWith(sdkOrPlatform, modulePath));
 }
 
 version::Version ModuleDecl::getLanguageVersionBuiltWith() const {

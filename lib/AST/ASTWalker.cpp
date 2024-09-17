@@ -977,17 +977,8 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
 
   Expr *visitCaptureListExpr(CaptureListExpr *expr) {
     for (auto c : expr->getCaptureList()) {
-      if (Walker.shouldWalkCaptureInitializerExpressions()) {
-        for (auto entryIdx : range(c.PBD->getNumPatternEntries())) {
-          if (auto newInit = doIt(c.PBD->getInit(entryIdx)))
-            c.PBD->setInit(entryIdx, newInit);
-          else
-            return nullptr;
-        }
-      } else {
-        if (doIt(c.PBD))
-          return nullptr;
-      }
+      if (doIt(c.PBD))
+        return nullptr;
     }
 
     AbstractClosureExpr *body = expr->getClosureBody();
@@ -1011,12 +1002,6 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       if (doIt(expr->getExplicitResultTypeRepr()))
         return nullptr;
     }
-
-    // If the closure was separately type checked and we don't want to
-    // visit separately-checked closure bodies, bail out now.
-    if (expr->isSeparatelyTypeChecked() &&
-        !Walker.shouldWalkIntoSeparatelyCheckedClosure(expr))
-      return expr;
 
     // Handle other closures.
     if (BraceStmt *body = cast_or_null<BraceStmt>(doIt(expr->getBody()))) {
@@ -1434,6 +1419,10 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       }
       E->setRewritten(rewritten);
     }
+    return E;
+  }
+
+  Expr *visitTypeValueExpr(TypeValueExpr *E) {
     return E;
   }
 
@@ -2387,6 +2376,10 @@ bool Traversal::visitSILBoxTypeRepr(SILBoxTypeRepr *T) {
 
 bool Traversal::visitLifetimeDependentTypeRepr(LifetimeDependentTypeRepr *T) {
   return doIt(T->getBase());
+}
+
+bool Traversal::visitIntegerTypeRepr(IntegerTypeRepr *T) {
+  return false;
 }
 
 Expr *Expr::walk(ASTWalker &walker) {

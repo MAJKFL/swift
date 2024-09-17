@@ -96,6 +96,7 @@ set(LLVM_TOOLCHAIN_TOOLS
       llvm-dwp
       llvm-lib
       llvm-lipo
+      llvm-ml
       llvm-mt
       llvm-nm
       llvm-objcopy
@@ -148,6 +149,7 @@ set(LLDB_TOOLS
 set(SWIFT_INSTALL_COMPONENTS
       autolink-driver
       compiler
+      compiler-swift-syntax-lib
       clang-builtin-headers
       editor-integration
       tools

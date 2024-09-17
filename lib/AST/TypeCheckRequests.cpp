@@ -1537,21 +1537,38 @@ void ResolveTypeEraserTypeRequest::cacheResult(Type value) const {
 }
 
 //----------------------------------------------------------------------------//
-// ResolveRawLayoutLikeTypeRequest computation.
+// ResolveRawLayoutTypeRequest computation.
 //----------------------------------------------------------------------------//
 
-std::optional<Type> ResolveRawLayoutLikeTypeRequest::getCachedResult() const {
-  auto Ty = std::get<1>(getStorage())->CachedResolvedLikeType;
-  if (!Ty) {
-    return std::nullopt;
+std::optional<Type> ResolveRawLayoutTypeRequest::getCachedResult() const {
+  auto attr = std::get<1>(getStorage());
+  auto isLikeType = std::get<2>(getStorage());
+
+  if (isLikeType) {
+    auto Ty = attr->CachedResolvedLikeType;
+    if (!Ty) {
+      return std::nullopt;
+    }
+    return Ty;
+  } else {
+    auto Ty = attr->CachedResolvedCountType;
+    if (!Ty) {
+      return std::nullopt;
+    }
+    return Ty;
   }
-  return Ty;
 }
 
-void ResolveRawLayoutLikeTypeRequest::cacheResult(Type value) const {
+void ResolveRawLayoutTypeRequest::cacheResult(Type value) const {
   assert(value && "Resolved type erasure type to null type!");
   auto *attr = std::get<1>(getStorage());
-  attr->CachedResolvedLikeType = value;
+  auto isLikeType = std::get<2>(getStorage());
+
+  if (isLikeType) {
+    attr->CachedResolvedLikeType = value;
+  } else {
+    attr->CachedResolvedCountType = value;
+  }
 }
 
 //----------------------------------------------------------------------------//
@@ -2596,4 +2613,21 @@ ParamCaptureInfoRequest::getCachedResult() const {
 void ParamCaptureInfoRequest::cacheResult(CaptureInfo info) const {
   auto *param = std::get<0>(getStorage());
   param->setDefaultArgumentCaptureInfo(info);
+}
+
+//----------------------------------------------------------------------------//
+// IsUnsafeRequest computation.
+//----------------------------------------------------------------------------//
+
+std::optional<bool> IsUnsafeRequest::getCachedResult() const {
+  auto *decl = std::get<0>(getStorage());
+  if (!decl->isUnsafeComputed())
+    return std::nullopt;
+
+  return decl->isUnsafeRaw();
+}
+
+void IsUnsafeRequest::cacheResult(bool value) const {
+  auto *decl = std::get<0>(getStorage());
+  decl->setUnsafe(value);
 }

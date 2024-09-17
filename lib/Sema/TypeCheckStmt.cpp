@@ -104,12 +104,7 @@ namespace {
 
       if (auto CE = dyn_cast<ClosureExpr>(E)) {
         CE->setParent(ParentDC);
-
-        // If the closure was type checked within its enclosing context,
-        // we need to walk into it. Otherwise, it'll have been separately
-        // type-checked.
-        if (!CE->isSeparatelyTypeChecked())
-          CE->getBody()->walk(ContextualizeClosuresAndMacros(CE));
+        CE->getBody()->walk(ContextualizeClosuresAndMacros(CE));
 
         TypeChecker::computeCaptures(CE);
         return Action::SkipNode(E);
@@ -283,18 +278,14 @@ namespace {
         if(CE->getRawDiscriminator() == ClosureExpr::InvalidDiscriminator)
           CE->setDiscriminator(NextClosureDiscriminator++);
 
-        // If the closure was type checked within its enclosing context,
-        // we need to walk into it with a new sequence.
-        // Otherwise, it'll have been separately type-checked.
-        if (!CE->isSeparatelyTypeChecked()) {
-          SetLocalDiscriminators innerVisitor;
-          if (auto params = CE->getParameters()) {
-            for (auto *param : *params) {
-              innerVisitor.setLocalDiscriminator(param);
-            }
+        // We need to walk into closure bodies with a new sequence.
+        SetLocalDiscriminators innerVisitor;
+        if (auto params = CE->getParameters()) {
+          for (auto *param : *params) {
+            innerVisitor.setLocalDiscriminator(param);
           }
-          CE->getBody()->walk(innerVisitor);
         }
+        CE->getBody()->walk(innerVisitor);
 
         return Action::SkipNode(E);
       }
@@ -742,6 +733,25 @@ ContinueTargetRequest::evaluate(Evaluator &evaluator,
       CS->getTargetName(), CS->getTargetLoc(), /*isContinue*/ true, DC);
 }
 
+FallthroughSourceAndDest
+FallthroughSourceAndDestRequest::evaluate(Evaluator &evaluator,
+                                          const FallthroughStmt *FS) const {
+  auto *SF = FS->getDeclContext()->getParentSourceFile();
+  auto &ctx = SF->getASTContext();
+  auto loc = FS->getLoc();
+
+  auto [src, dest] = ASTScope::lookupFallthroughSourceAndDest(SF, loc);
+  if (!src) {
+    ctx.Diags.diagnose(loc, diag::fallthrough_outside_switch);
+    return {};
+  }
+  if (!dest) {
+    ctx.Diags.diagnose(loc, diag::fallthrough_from_last_case);
+    return {};
+  }
+  return {src, dest};
+}
+
 static Expr *getDeclRefProvidingExpressionForHasSymbol(Expr *E) {
   // Strip coercions, which are necessary in source to disambiguate overloaded
   // functions or generic functions, e.g.
@@ -925,12 +935,18 @@ static bool typeCheckConditionForStatement(LabeledConditionalStmt *stmt,
   return false;
 }
 
-/// Verify that the pattern bindings for the cases that we're falling through
-/// from and to are equivalent.
-static void checkFallthroughPatternBindingsAndTypes(
-    ASTContext &ctx,
-    CaseStmt *caseBlock, CaseStmt *previousBlock,
-    FallthroughStmt *fallthrough) {
+/// Check the correctness of a 'fallthrough' statement.
+///
+/// \returns true if an error occurred.
+bool swift::checkFallthroughStmt(FallthroughStmt *FS) {
+  auto &ctx = FS->getDeclContext()->getASTContext();
+  auto *caseBlock = FS->getFallthroughDest();
+  auto *previousBlock = FS->getFallthroughSource();
+  if (!previousBlock || !caseBlock)
+    return true;
+
+  // Verify that the pattern bindings for the cases that we're falling through
+  // from and to are equivalent.
   auto firstPattern = caseBlock->getCaseLabelItems()[0].getPattern();
   SmallVector<VarDecl *, 4> vars;
   firstPattern->collectVariables(vars);
@@ -969,36 +985,10 @@ static void checkFallthroughPatternBindingsAndTypes(
 
     if (!matched) {
       ctx.Diags.diagnose(
-          fallthrough->getLoc(), diag::fallthrough_into_case_with_var_binding,
+          FS->getLoc(), diag::fallthrough_into_case_with_var_binding,
           expected->getName());
     }
   }
-}
-
-/// Check the correctness of a 'fallthrough' statement.
-///
-/// \returns true if an error occurred.
-bool swift::checkFallthroughStmt(DeclContext *dc, FallthroughStmt *stmt) {
-  CaseStmt *fallthroughSource;
-  CaseStmt *fallthroughDest;
-  ASTContext &ctx = dc->getASTContext();
-  auto sourceFile = dc->getParentSourceFile();
-  std::tie(fallthroughSource, fallthroughDest) =
-      ASTScope::lookupFallthroughSourceAndDest(sourceFile, stmt->getLoc());
-
-  if (!fallthroughSource) {
-    ctx.Diags.diagnose(stmt->getLoc(), diag::fallthrough_outside_switch);
-    return true;
-  }
-  if (!fallthroughDest) {
-    ctx.Diags.diagnose(stmt->getLoc(), diag::fallthrough_from_last_case);
-    return true;
-  }
-  stmt->setFallthroughSource(fallthroughSource);
-  stmt->setFallthroughDest(fallthroughDest);
-
-  checkFallthroughPatternBindingsAndTypes(
-      ctx, fallthroughDest, fallthroughSource, stmt);
   return false;
 }
 
@@ -1457,7 +1447,7 @@ public:
   }
 
   Stmt *visitFallthroughStmt(FallthroughStmt *S) {
-    if (checkFallthroughStmt(DC, S))
+    if (checkFallthroughStmt(S))
       return nullptr;
 
     return S;
@@ -2979,25 +2969,6 @@ TypeCheckFunctionBodyRequest::evaluate(Evaluator &eval,
   return hadError ? errorBody() : body;
 }
 
-bool TypeChecker::typeCheckClosureBody(ClosureExpr *closure) {
-  TypeChecker::checkClosureAttributes(closure);
-  TypeChecker::checkParameterList(closure->getParameters(), closure);
-
-  BraceStmt *body = closure->getBody();
-
-  std::optional<FunctionBodyTimer> timer;
-  const auto &tyOpts = closure->getASTContext().TypeCheckerOpts;
-  if (tyOpts.DebugTimeFunctionBodies || tyOpts.WarnLongFunctionBodies)
-    timer.emplace(closure);
-
-  bool HadError = StmtChecker(closure).typeCheckBody(body);
-  if (body) {
-    closure->setBody(body);
-  }
-  closure->setBodyState(ClosureExpr::BodyState::SeparatelyTypeChecked);
-  return HadError;
-}
-
 bool TypeChecker::typeCheckTapBody(TapExpr *expr, DeclContext *DC) {
   // We intentionally use typeCheckStmt instead of typeCheckBody here
   // because we want to contextualize TapExprs with the body they're in.
@@ -3023,11 +2994,14 @@ namespace {
 /// An ASTWalker that searches for any break/continue/return statements that
 /// jump out of the context the walker starts at.
 class JumpOutOfContextFinder : public ASTWalker {
+  const Stmt *ParentStmt;
   TinyPtrVector<Stmt *> &Jumps;
   SmallPtrSet<Stmt *, 4> ParentLabeledStmts;
+  SmallPtrSet<CaseStmt *, 4> ParentCaseStmts;
 
 public:
-  JumpOutOfContextFinder(TinyPtrVector<Stmt *> &jumps) : Jumps(jumps) {}
+  JumpOutOfContextFinder(const Stmt *parentStmt, TinyPtrVector<Stmt *> &jumps)
+      : ParentStmt(parentStmt), Jumps(jumps) {}
 
   MacroWalking getMacroWalkingBehavior() const override {
     return MacroWalking::Expansion;
@@ -3036,9 +3010,11 @@ public:
   PreWalkResult<Stmt *> walkToStmtPre(Stmt *S) override {
     if (auto *LS = dyn_cast<LabeledStmt>(S))
       ParentLabeledStmts.insert(LS);
+    if (auto *CS = dyn_cast<CaseStmt>(S))
+      ParentCaseStmts.insert(CS);
 
-    // Cannot 'break', 'continue', or 'return' out of the statement. A jump to
-    // a statement within a branch however is fine.
+    // Cannot 'break', 'continue', 'fallthrough' or 'return' out of the
+    // statement. A jump to a statement within a branch however is fine.
     if (auto *BS = dyn_cast<BreakStmt>(S)) {
       if (!ParentLabeledStmts.contains(BS->getTarget()))
         Jumps.push_back(BS);
@@ -3046,6 +3022,17 @@ public:
     if (auto *CS = dyn_cast<ContinueStmt>(S)) {
       if (!ParentLabeledStmts.contains(CS->getTarget()))
         Jumps.push_back(CS);
+    }
+    if (auto *FS = dyn_cast<FallthroughStmt>(S)) {
+      // The source must either be in the parent statement, or must be a
+      // nested CaseStmt we've seen. If there's no source, we will have
+      // already diagnosed.
+      if (auto *source = FS->getFallthroughSource()) {
+        if (source->getParentStmt() != ParentStmt &&
+            !ParentCaseStmts.contains(source)) {
+          Jumps.push_back(FS);
+        }
+      }
     }
     if (isa<ReturnStmt>(S) || isa<FailStmt>(S))
       Jumps.push_back(S);
@@ -3055,6 +3042,11 @@ public:
   PostWalkResult<Stmt *> walkToStmtPost(Stmt *S) override {
     if (auto *LS = dyn_cast<LabeledStmt>(S)) {
       auto removed = ParentLabeledStmts.erase(LS);
+      assert(removed);
+      (void)removed;
+    }
+    if (auto *CS = dyn_cast<CaseStmt>(S)) {
+      auto removed = ParentCaseStmts.erase(CS);
       assert(removed);
       (void)removed;
     }
@@ -3072,23 +3064,12 @@ public:
 };
 } // end anonymous namespace
 
-/// Whether the given brace statement ends with a 'throw'.
-static bool doesBraceEndWithThrow(BraceStmt *BS) {
-  if (BS->empty())
-    return false;
-
-  auto *S = BS->getLastElement().dyn_cast<Stmt *>();
-  if (!S)
-    return false;
-
-  return isa<ThrowStmt>(S);
-}
-
 IsSingleValueStmtResult
-areBranchesValidForSingleValueStmt(ASTContext &ctx, ArrayRef<Stmt *> branches) {
+areBranchesValidForSingleValueStmt(ASTContext &ctx, const Stmt *parentStmt,
+                                   ArrayRef<Stmt *> branches) {
   TinyPtrVector<Stmt *> invalidJumps;
   TinyPtrVector<Stmt *> unterminatedBranches;
-  JumpOutOfContextFinder jumpFinder(invalidJumps);
+  JumpOutOfContextFinder jumpFinder(parentStmt, invalidJumps);
 
   // Must have a single expression brace, and non-single-expression branches
   // must end with a throw.
@@ -3109,8 +3090,20 @@ areBranchesValidForSingleValueStmt(ASTContext &ctx, ArrayRef<Stmt *> branches) {
       continue;
     }
 
-    // If there was no result, the branch must end in a 'throw'.
-    if (!doesBraceEndWithThrow(BS))
+    // If there was no result, the branch must end in a 'throw' or
+    // 'fallthrough'.
+    auto endsInJump = [&]() {
+      if (BS->empty())
+        return false;
+
+      auto *S = BS->getLastElement().dyn_cast<Stmt *>();
+      if (!S)
+        return false;
+
+      return isa<ThrowStmt>(S) || isa<FallthroughStmt>(S);
+    }();
+
+    if (!endsInJump)
       unterminatedBranches.push_back(BS);
   }
 
@@ -3146,17 +3139,19 @@ IsSingleValueStmtRequest::evaluate(Evaluator &eval, const Stmt *S,
       return IsSingleValueStmtResult::nonExhaustiveIf();
 
     SmallVector<Stmt *, 4> scratch;
-    return areBranchesValidForSingleValueStmt(ctx, IS->getBranches(scratch));
+    return areBranchesValidForSingleValueStmt(ctx, IS,
+                                              IS->getBranches(scratch));
   }
   if (auto *SS = dyn_cast<SwitchStmt>(S)) {
     SmallVector<Stmt *, 4> scratch;
-    return areBranchesValidForSingleValueStmt(ctx, SS->getBranches(scratch));
+    return areBranchesValidForSingleValueStmt(ctx, SS,
+                                              SS->getBranches(scratch));
   }
   if (auto *DS = dyn_cast<DoStmt>(S)) {
     if (!ctx.LangOpts.hasFeature(Feature::DoExpressions))
       return IsSingleValueStmtResult::unhandledStmt();
 
-    return areBranchesValidForSingleValueStmt(ctx, DS->getBody());
+    return areBranchesValidForSingleValueStmt(ctx, DS, DS->getBody());
   }
   if (auto *DCS = dyn_cast<DoCatchStmt>(S)) {
     if (!ctx.LangOpts.hasFeature(Feature::DoExpressions))
@@ -3166,7 +3161,8 @@ IsSingleValueStmtRequest::evaluate(Evaluator &eval, const Stmt *S,
       return IsSingleValueStmtResult::nonExhaustiveDoCatch();
 
     SmallVector<Stmt *, 4> scratch;
-    return areBranchesValidForSingleValueStmt(ctx, DCS->getBranches(scratch));
+    return areBranchesValidForSingleValueStmt(ctx, DCS,
+                                              DCS->getBranches(scratch));
   }
   return IsSingleValueStmtResult::unhandledStmt();
 }

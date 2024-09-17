@@ -1177,6 +1177,7 @@ information when inlined.
   sil-function-thunk ::= 'thunk'
   sil-function-thunk ::= 'signature_optimized_thunk'
   sil-function-thunk ::= 'reabstraction_thunk'
+  sil-function-thunk ::= 'back_deployed_thunk'
 
 The function is a compiler generated thunk.
 ::
@@ -2748,12 +2749,12 @@ That's the case if the destroy point is jointly dominated by:
 
 or
 
-* an ``inject_enum_addr`` to the enum memory location with a non-trivial or
+* an ``inject_enum_addr`` to the enum memory location with a trivial or
   non-payload case.
 
 or
 
-* a successor of a ``switch_enum`` or ``switch_enum_addr`` for a non-trivial
+* a successor of a ``switch_enum`` or ``switch_enum_addr`` for a trivial
   or non-payload case.
 
 Dead End Blocks
@@ -7760,6 +7761,20 @@ is the pack and must be the address of a pack value.  The type of the
 element value operand is the projected element type of the pack element
 and must be structurally well-typed for the given index and pack type;
 see the structural type matching rules for pack indices.
+
+Value Generics
+~~~~~~~~~~~~~~~~~
+
+type_value
+```````````
+
+::
+
+  sil-instruction ::= 'type_value' sil-type 'for' sil-identifier
+
+Produce the dynamic value of the given value generic, which must be a formal
+value generic type. The value of the instruction has the type of whatever the
+underlying value generic's type is. For right now that is limited to ``Int``.
 
 Unchecked Conversions
 ~~~~~~~~~~~~~~~~~~~~~

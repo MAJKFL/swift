@@ -1701,6 +1701,7 @@ namespace  {
     UNINTERESTING_ATTR(UnsafeNonEscapableResult)
     UNINTERESTING_ATTR(StaticExclusiveOnly)
     UNINTERESTING_ATTR(PreInverseGenerics)
+    UNINTERESTING_ATTR(Lifetime)
 #undef UNINTERESTING_ATTR
 
     void visitAvailableAttr(AvailableAttr *attr) {
@@ -1731,6 +1732,17 @@ namespace  {
     }
 
     void visitObjCAttr(ObjCAttr *attr) {}
+
+    void visitUnsafeAttr(UnsafeAttr *attr) {
+      if (!Base->getASTContext().LangOpts.hasFeature(Feature::WarnUnsafe))
+        return;
+
+      if (Override->isUnsafe() && !Base->isUnsafe()) {
+        Diags.diagnose(Override, diag::override_safe_withunsafe,
+                       Base->getDescriptiveKind());
+        Diags.diagnose(Base, diag::overridden_here);
+      }
+    }
   };
 } // end anonymous namespace
 
@@ -1764,19 +1776,18 @@ static bool isAvailabilitySafeForOverride(ValueDecl *override,
   // API availability ranges are contravariant: make sure the version range
   // of an overridden declaration is fully contained in the range of the
   // overriding declaration.
-  AvailabilityContext overrideInfo =
-    AvailabilityInference::availableRange(override, ctx);
-  AvailabilityContext baseInfo =
-    AvailabilityInference::availableRange(base, ctx);
+  AvailabilityRange overrideInfo =
+      AvailabilityInference::availableRange(override, ctx);
+  AvailabilityRange baseInfo = AvailabilityInference::availableRange(base, ctx);
 
   if (baseInfo.isContainedIn(overrideInfo))
     return true;
 
   // Allow overrides that are not as available as the base decl as long as the
   // override is as available as its context.
-  auto overrideTypeAvailability = AvailabilityInference::inferForType(
-      override->getDeclContext()->getSelfTypeInContext());
-  
+  auto overrideTypeAvailability = AvailabilityInference::availableRange(
+      override->getDeclContext()->getSelfNominalTypeDecl(), ctx);
+
   return overrideTypeAvailability.isContainedIn(overrideInfo);
 }
 

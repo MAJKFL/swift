@@ -18,6 +18,7 @@
 #ifndef SWIFT_AST_TYPETRANSFORM_H
 #define SWIFT_AST_TYPETRANSFORM_H
 
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/SILLayout.h"
 
 namespace swift {
@@ -104,19 +105,74 @@ public:
 case TypeKind::Id:
 #define TYPE(Id, Parent)
 #include "swift/AST/TypeNodes.def"
-    case TypeKind::PrimaryArchetype:
-    case TypeKind::OpenedArchetype:
-    case TypeKind::PackArchetype:
-    case TypeKind::ElementArchetype:
     case TypeKind::Error:
     case TypeKind::Unresolved:
     case TypeKind::TypeVariable:
     case TypeKind::Placeholder:
-    case TypeKind::GenericTypeParam:
     case TypeKind::SILToken:
     case TypeKind::Module:
     case TypeKind::BuiltinTuple:
+    case TypeKind::Integer:
       return t;
+
+    case TypeKind::PrimaryArchetype:
+    case TypeKind::PackArchetype: {
+      auto *archetype = cast<ArchetypeType>(base);
+      return asDerived().transformPrimaryArchetypeType(archetype, pos);
+    }
+
+    case TypeKind::OpaqueTypeArchetype: {
+      auto *opaque = cast<OpaqueTypeArchetypeType>(base);
+      if (auto result = asDerived().transformOpaqueTypeArchetypeType(opaque, pos))
+        return *result;
+
+      auto subMap = opaque->getSubstitutions();
+      auto newSubMap = asDerived().transformSubMap(subMap);
+      if (newSubMap == subMap)
+        return t;
+      if (!newSubMap)
+        return Type();
+
+      return OpaqueTypeArchetypeType::get(opaque->getDecl(),
+                                          opaque->getInterfaceType(),
+                                          newSubMap);
+    }
+
+    case TypeKind::OpenedArchetype: {
+      auto *local = cast<LocalArchetypeType>(base);
+      if (auto result = asDerived().transformLocalArchetypeType(local, pos))
+        return *result;
+
+      auto *env = local->getGenericEnvironment();
+
+      auto genericSig = env->getGenericSignature();
+      auto existentialTy = env->getOpenedExistentialType();
+      auto subMap = env->getOuterSubstitutions();
+      auto uuid = env->getOpenedExistentialUUID();
+
+      auto newSubMap = asDerived().transformSubMap(subMap);
+      if (newSubMap == subMap)
+        return t;
+      if (!newSubMap)
+        return Type();
+
+      auto *newEnv = GenericEnvironment::forOpenedExistential(
+          genericSig, existentialTy, newSubMap, uuid);
+      return newEnv->mapTypeIntoContext(local->getInterfaceType());
+    }
+
+    case TypeKind::ElementArchetype: {
+      auto *local = cast<LocalArchetypeType>(base);
+      if (auto result = asDerived().transformLocalArchetypeType(local, pos))
+        return *result;
+
+      return local;
+    }
+
+    case TypeKind::GenericTypeParam: {
+      auto *param = cast<GenericTypeParamType>(base);
+      return asDerived().transformGenericTypeParamType(param, pos);
+    }
 
     case TypeKind::Enum:
     case TypeKind::Struct:
@@ -136,7 +192,7 @@ case TypeKind::Id:
 
       return t;
     }
-        
+
     case TypeKind::SILBlockStorage: {
       auto storageTy = cast<SILBlockStorageType>(base);
       Type transCap = doIt(storageTy->getCaptureType(),
@@ -164,24 +220,22 @@ case TypeKind::Id:
     case TypeKind::SILBox: {
       bool changed = false;
       auto boxTy = cast<SILBoxType>(base);
-  #ifndef NDEBUG
-      // This interface isn't suitable for updating the substitution map in a
-      // generic SILBox.
-      for (Type type : boxTy->getSubstitutions().getReplacementTypes()) {
-        assert(type->isEqual(
-                   doIt(type, TypePosition::Invariant)) &&
-               "SILBoxType substitutions can't be transformed");
-      }
-  #endif
+
       SmallVector<SILField, 4> newFields;
       auto *l = boxTy->getLayout();
       for (auto f : l->getFields()) {
         auto fieldTy = f.getLoweredType();
-        auto transformed = doIt(fieldTy, TypePosition::Invariant)
-                ->getCanonicalType();
+        auto transformed = asDerived().transformSILField(
+          fieldTy, TypePosition::Invariant);
         changed |= fieldTy != transformed;
         newFields.push_back(SILField(transformed, f.isMutable()));
       }
+
+      auto oldSubMap = boxTy->getSubstitutions();
+      auto newSubMap = asDerived().transformSubMap(oldSubMap);
+      if (oldSubMap && !newSubMap)
+        return Type();
+      changed |= (oldSubMap != newSubMap);
       if (!changed)
         return t;
       boxTy = SILBoxType::get(ctx,
@@ -189,38 +243,26 @@ case TypeKind::Id:
                                              l->getGenericSignature(),
                                              newFields,
                                              l->capturesGenericEnvironment()),
-                              boxTy->getSubstitutions());
+                              newSubMap);
       return boxTy;
     }
-    
+
     case TypeKind::SILFunction: {
       auto fnTy = cast<SILFunctionType>(base);
-      bool changed = false;
-      auto updateSubs = [&](SubstitutionMap &subs) -> bool {
-        // This interface isn't suitable for doing most transformations on
-        // a substituted SILFunctionType, but it's too hard to come up with
-        // an assertion that meaningfully captures what restrictions are in
-        // place.  Generally the restriction that you can't naively substitute
-        // a SILFunctionType using AST mechanisms will have to be good enough.
-        SmallVector<Type, 4> newReplacements;
-        for (Type type : subs.getReplacementTypes()) {
-          auto transformed = doIt(type, TypePosition::Invariant);
-          newReplacements.push_back(transformed->getCanonicalType());
-          if (!type->isEqual(transformed))
-            changed = true;
-        }
-
-        if (changed) {
-          subs = SubstitutionMap::get(subs.getGenericSignature(),
-                                      newReplacements,
-                                      subs.getConformances());
-        }
-
-        return changed;
-      };
 
       if (fnTy->isPolymorphic())
         return fnTy;
+
+      auto updateSubs = [&](SubstitutionMap &subs) -> bool {
+        auto newSubs = asDerived().transformSubMap(subs);
+        if (subs && !newSubs)
+          return false;
+        if (subs == newSubs)
+          return false;
+
+        subs = newSubs;
+        return true;
+      };
 
       if (auto subs = fnTy->getInvocationSubstitutions()) {
         if (updateSubs(subs)) {
@@ -235,6 +277,8 @@ case TypeKind::Id:
         }
         return fnTy;
       }
+
+      bool changed = false;
 
       SmallVector<SILParameterInfo, 8> transInterfaceParams;
       for (SILParameterInfo param : fnTy->getParameters()) {
@@ -364,37 +408,6 @@ case TypeKind::Id:
 
       return BoundGenericType::get(bound->getDecl(), substParentTy, substArgs);
     }
-        
-    case TypeKind::OpaqueTypeArchetype: {
-      auto opaque = cast<OpaqueTypeArchetypeType>(base);
-      if (opaque->getSubstitutions().empty())
-        return t;
-      
-      SmallVector<Type, 4> newSubs;
-      bool anyChanged = false;
-      for (auto replacement : opaque->getSubstitutions().getReplacementTypes()) {
-        Type newReplacement = doIt(replacement, TypePosition::Invariant);
-        if (!newReplacement)
-          return Type();
-        newSubs.push_back(newReplacement);
-        if (replacement.getPointer() != newReplacement.getPointer())
-          anyChanged = true;
-      }
-      
-      if (!anyChanged)
-        return t;
-      
-      // FIXME: This re-looks-up conformances instead of transforming them in
-      // a systematic way.
-      auto sig = opaque->getDecl()->getGenericSignature();
-      auto newSubMap =
-        SubstitutionMap::get(sig,
-          QueryReplacementTypeArray{sig, newSubs},
-          LookUpConformanceInModule());
-      return OpaqueTypeArchetypeType::get(opaque->getDecl(),
-                                          opaque->getInterfaceType(),
-                                          newSubMap);
-    }
 
     case TypeKind::ExistentialMetatype: {
       auto meta = cast<ExistentialMetatypeType>(base);
@@ -450,23 +463,28 @@ case TypeKind::Id:
         if (!newParentType) return newUnderlyingTy;
       }
 
-      auto subMap = alias->getSubstitutionMap();
-      for (Type oldReplacementType : subMap.getReplacementTypes()) {
-        Type newReplacementType = doIt(oldReplacementType, TypePosition::Invariant);
-        if (!newReplacementType)
-          return newUnderlyingTy;
+      if (newParentType && newParentType->isExistentialType())
+        return newUnderlyingTy;
 
-        // If anything changed with the replacement type, we lose the sugar.
-        // FIXME: This is really unfortunate.
-        if (newReplacementType.getPointer() != oldReplacementType.getPointer())
-          return newUnderlyingTy;
-      }
+      auto oldSubMap = alias->getSubstitutionMap();
+      auto newSubMap = asDerived().transformSubMap(oldSubMap);
+      if (oldSubMap && !newSubMap)
+        return Type();
 
       if (oldParentType.getPointer() == newParentType.getPointer() &&
-          oldUnderlyingTy.getPointer() == newUnderlyingTy.getPointer())
+          oldUnderlyingTy.getPointer() == newUnderlyingTy.getPointer() &&
+          oldSubMap == newSubMap)
         return t;
 
-      return TypeAliasType::get(alias->getDecl(), newParentType, subMap,
+      // Don't leave local archetypes and type variables behind in sugar
+      // if they don't appear in the underlying type, to avoid confusion.
+      auto props = newSubMap.getRecursiveProperties();
+      if (props.hasLocalArchetype() && !newUnderlyingTy->hasLocalArchetype())
+        return newUnderlyingTy;
+      if (props.hasTypeVariable() && !newUnderlyingTy->hasTypeVariable())
+        return newUnderlyingTy;
+
+      return TypeAliasType::get(alias->getDecl(), newParentType, newSubMap,
                                 newUnderlyingTy);
     }
 
@@ -610,43 +628,13 @@ case TypeKind::Id:
     }
 
     case TypeKind::PackExpansion: {
-      auto expand = cast<PackExpansionType>(base);
-
-      // Substitution completely replaces this.
-
-      Type transformedPat = doIt(expand->getPatternType(), pos);
-      if (!transformedPat)
-        return Type();
-
-      Type transformedCount = doIt(expand->getCountType(), TypePosition::Shape);
-      if (!transformedCount)
-        return Type();
-
-      if (transformedPat.getPointer() == expand->getPatternType().getPointer() &&
-          transformedCount.getPointer() == expand->getCountType().getPointer())
-        return t;
-
-      // // If we transform the count to a pack type, expand the pattern.
-      // // This is necessary because of how we piece together types in
-      // // the constraint system.
-      // if (auto countPack = transformedCount->getAs<PackType>()) {
-      //   return PackExpansionType::expand(transformedPat, countPack);
-      // }
-
-      return PackExpansionType::get(transformedPat, transformedCount);
+      auto *expand = cast<PackExpansionType>(base);
+      return asDerived().transformPackExpansionType(expand, pos);
     }
 
     case TypeKind::PackElement: {
       auto element = cast<PackElementType>(base);
-
-      Type transformedPack = doIt(element->getPackType(), pos);
-      if (!transformedPack)
-        return Type();
-
-      if (transformedPack.getPointer() == element->getPackType().getPointer())
-        return t;
-
-      return PackElementType::get(transformedPack, element->getLevel());
+      return asDerived().transformPackElementType(element, pos);
     }
 
     case TypeKind::Tuple: {
@@ -712,17 +700,7 @@ case TypeKind::Id:
 
     case TypeKind::DependentMember: {
       auto dependent = cast<DependentMemberType>(base);
-      auto dependentBase = doIt(dependent->getBase(), pos);
-      if (!dependentBase)
-        return Type();
-
-      if (dependentBase.getPointer() == dependent->getBase().getPointer())
-        return t;
-
-      if (auto assocType = dependent->getAssocType())
-        return DependentMemberType::get(dependentBase, assocType);
-
-      return DependentMemberType::get(dependentBase, dependent->getName());
+      return asDerived().transformDependentMemberType(dependent, pos);
     }
 
     case TypeKind::GenericFunction:
@@ -919,7 +897,7 @@ case TypeKind::Id:
       auto objectTy = doIt(inout->getObjectType(), TypePosition::Invariant);
       if (!objectTy || objectTy->hasError())
         return objectTy;
-      
+
       return objectTy.getPointer() == inout->getObjectType().getPointer() ?
         t : InOutType::get(objectTy);
     }
@@ -952,10 +930,10 @@ case TypeKind::Id:
         if (substMember.getPointer() != member.getPointer())
           anyChanged = true;
       }
-      
+
       if (!anyChanged)
         return t;
-      
+
       return ProtocolCompositionType::get(ctx,
                                           substMembers,
                                           pc->getInverses(),
@@ -996,8 +974,98 @@ case TypeKind::Id:
           substArgs);
     }
     }
-    
+
     llvm_unreachable("Unhandled type in transformation");
+  }
+
+  // If original was non-empty and transformed is empty, we're
+  // signaling failure, that is, a Type() return from doIt().
+  SubstitutionMap transformSubMap(SubstitutionMap subs) {
+    if (subs.empty())
+      return subs;
+
+    SmallVector<Type, 4> newSubs;
+    bool anyChanged = false;
+    for (auto replacement : subs.getReplacementTypes()) {
+      Type newReplacement = doIt(replacement, TypePosition::Invariant);
+      if (!newReplacement)
+        return SubstitutionMap();
+      newSubs.push_back(newReplacement);
+      if (replacement.getPointer() != newReplacement.getPointer())
+        anyChanged = true;
+    }
+
+    if (!anyChanged)
+      return subs;
+
+    auto sig = subs.getGenericSignature();
+    return SubstitutionMap::get(sig, newSubs, LookUpConformanceInModule());
+  }
+
+  CanType transformSILField(CanType fieldTy, TypePosition pos) {
+    return doIt(fieldTy, pos)->getCanonicalType();
+  }
+
+  Type transformGenericTypeParamType(GenericTypeParamType *param, TypePosition pos) {
+    return param;
+  }
+
+  Type transformPackExpansionType(PackExpansionType *expand, TypePosition pos) {
+    // Substitution completely replaces this.
+
+    Type transformedPat = doIt(expand->getPatternType(), pos);
+    if (!transformedPat)
+      return Type();
+
+    Type transformedCount = doIt(expand->getCountType(), TypePosition::Shape);
+    if (!transformedCount)
+      return Type();
+
+    if (transformedPat.getPointer() == expand->getPatternType().getPointer() &&
+        transformedCount.getPointer() == expand->getCountType().getPointer())
+      return expand;
+
+    return PackExpansionType::get(transformedPat, transformedCount);
+  }
+
+  Type transformPackElementType(PackElementType *element, TypePosition pos) {
+    Type transformedPack = doIt(element->getPackType(), pos);
+    if (!transformedPack)
+      return Type();
+
+    if (transformedPack.getPointer() == element->getPackType().getPointer())
+      return element;
+
+    return PackElementType::get(transformedPack, element->getLevel());
+  }
+
+  Type transformDependentMemberType(DependentMemberType *dependent, TypePosition pos) {
+    auto dependentBase = doIt(dependent->getBase(), pos);
+    if (!dependentBase)
+      return Type();
+
+    if (dependentBase.getPointer() == dependent->getBase().getPointer())
+      return dependent;
+
+    if (auto assocType = dependent->getAssocType())
+      return DependentMemberType::get(dependentBase, assocType);
+
+    return DependentMemberType::get(dependentBase, dependent->getName());
+  }
+
+  Type transformPrimaryArchetypeType(ArchetypeType *primary,
+                                     TypePosition pos) {
+    return primary;
+  }
+
+  std::optional<Type> transformOpaqueTypeArchetypeType(OpaqueTypeArchetypeType *opaque,
+                                                       TypePosition pos) {
+    return std::nullopt;
+  }
+
+  std::optional<Type> transformLocalArchetypeType(LocalArchetypeType *opaque,
+                                                  TypePosition pos) {
+    return std::nullopt;
   }
 };
 

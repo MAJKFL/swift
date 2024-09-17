@@ -593,6 +593,7 @@ namespace {
     RValue visitCopyExpr(CopyExpr *E, SGFContext C);
     RValue visitMacroExpansionExpr(MacroExpansionExpr *E, SGFContext C);
     RValue visitCurrentContextIsolationExpr(CurrentContextIsolationExpr *E, SGFContext C);
+    RValue visitTypeValueExpr(TypeValueExpr *E, SGFContext C);
   };
 } // end anonymous namespace
 
@@ -1507,24 +1508,20 @@ RValue SILGenFunction::emitCollectionConversion(SILLocation loc,
                                                 CanType toCollection,
                                                 ManagedValue mv,
                                                 SGFContext C) {
-  auto *fromDecl = fromCollection->getAnyNominal();
-  auto *toDecl = toCollection->getAnyNominal();
+  SmallVector<Type, 4> replacementTypes;
 
-  auto fromSubMap = fromCollection->getContextSubstitutionMap(fromDecl);
-  auto toSubMap = toCollection->getContextSubstitutionMap(toDecl);
+  auto fromArgs = cast<BoundGenericType>(fromCollection)->getGenericArgs();
+  auto toArgs = cast<BoundGenericType>(toCollection)->getGenericArgs();
+  replacementTypes.insert(replacementTypes.end(),
+                          fromArgs.begin(), fromArgs.end());
+  replacementTypes.insert(replacementTypes.end(),
+                          toArgs.begin(), toArgs.end());
 
   // Form type parameter substitutions.
   auto genericSig = fn->getGenericSignature();
-  unsigned fromParamCount = fromDecl->getGenericSignature()
-    .getGenericParams().size();
-
   auto subMap =
-    SubstitutionMap::combineSubstitutionMaps(fromSubMap,
-                                             toSubMap,
-                                             CombineSubstitutionMaps::AtIndex,
-                                             fromParamCount,
-                                             0,
-                                             genericSig);
+    SubstitutionMap::get(genericSig, replacementTypes,
+                         LookUpConformanceInModule());
   return emitApplyOfLibraryIntrinsic(loc, fn, subMap, {mv}, C);
 }
 
@@ -1567,9 +1564,8 @@ RValueEmitter::visitConditionalBridgeFromObjCExpr(
   auto conversion = cast<FuncDecl>(conversionRef.getDecl());
   auto subs = conversionRef.getSubstitutions();
 
-  auto nativeType = Type(GenericTypeParamType::get(/*isParameterPack*/ false,
-                                                   /*depth*/ 0, /*index*/ 0,
-                                                   SGF.getASTContext()))
+  auto nativeType = Type(GenericTypeParamType::getType(/*depth*/ 0, /*index*/ 0,
+                                                       SGF.getASTContext()))
                         .subst(subs);
 
   auto metatypeType = SGF.getLoweredType(MetatypeType::get(nativeType));
@@ -2144,8 +2140,7 @@ RValue RValueEmitter::visitErasureExpr(ErasureExpr *E, SGFContext C) {
   auto &existentialTL = SGF.getTypeLowering(E->getType());
   auto concreteFormalType = E->getSubExpr()->getType()->getCanonicalType();
 
-  auto archetype = OpenedArchetypeType::getAny(E->getType()->getCanonicalType(),
-                                               SGF.F.getGenericSignature());
+  auto archetype = OpenedArchetypeType::getAny(E->getType()->getCanonicalType());
   AbstractionPattern abstractionPattern(archetype);
   auto &concreteTL = SGF.getTypeLowering(abstractionPattern,
                                          concreteFormalType);
@@ -3186,8 +3181,7 @@ emitKeyPathRValueBase(SILGenFunction &subSGF,
     // new one (which we'll upcast immediately below) for a class member.
     ArchetypeType *opened;
     if (storage->getDeclContext()->getSelfClassDecl()) {
-      opened = OpenedArchetypeType::get(baseType,
-                                        subSGF.F.getGenericSignature());
+      opened = OpenedArchetypeType::get(baseType);
     } else {
       opened = subs.getReplacementTypes()[0]->castTo<ArchetypeType>();
     }
@@ -3809,8 +3803,7 @@ getOrCreateKeyPathEqualsAndHash(SILGenModule &SGM,
       // Get the Equatable conformance from the Hashable conformance.
       auto equatable = hashable.getAssociatedConformance(
           formalTy,
-          GenericTypeParamType::get(/*isParameterPack*/ false,
-                                    /*depth*/ 0, /*index*/ 0, C),
+          GenericTypeParamType::getType(/*depth*/ 0, /*index*/ 0, C),
           equatableProtocol);
 
       assert(equatable.isAbstract() == hashable.isAbstract());
@@ -4217,11 +4210,12 @@ SILGenModule::emitKeyPathComponentForDecl(SILLocation loc,
     // Map the substitutions out of context.
     if (!subs.empty()) {
       externalSubs = subs;
-      // If any of the substitutions involve local archetypes, then the
+      // If any of the substitutions involve primary archetypes, then the
       // key path pattern needs to capture the generic context, and we need
       // to map the pattern substitutions out of this context.
-      if (externalSubs.hasArchetypes()) {
+      if (externalSubs.getRecursiveProperties().hasArchetype()) {
         needsGenericContext = true;
+        // FIXME: This doesn't do anything for local archetypes!
         externalSubs = externalSubs.mapReplacementTypesOutOfContext();
       }
     }
@@ -6354,19 +6348,18 @@ SILGenFunction::emitArrayToPointer(SILLocation loc, ManagedValue array,
     assert(array.isLValue());
   }
 
-  // Invoke the conversion intrinsic, which will produce an owner-pointer pair.
-  auto firstSubMap =
-      accessInfo.ArrayType->getContextSubstitutionMap();
-  auto secondSubMap = accessInfo.PointerType->getContextSubstitutionMap(
-      getPointerProtocol());
-
-  auto genericSig = converter->getGenericSignature();
-  auto subMap = SubstitutionMap::combineSubstitutionMaps(
-      firstSubMap, secondSubMap, CombineSubstitutionMaps::AtIndex, 1, 0,
-      genericSig);
-
   diagnoseImplicitRawConversion(accessInfo.ArrayType, accessInfo.PointerType,
                                 loc, *this);
+
+  // Invoke the conversion intrinsic, which will produce an owner-pointer pair.
+  SmallVector<Type, 2> replacementTypes;
+  replacementTypes.push_back(
+      accessInfo.ArrayType->castTo<BoundGenericStructType>()->getGenericArgs()[0]);
+  replacementTypes.push_back(accessInfo.PointerType);
+
+  auto genericSig = converter->getGenericSignature();
+  auto subMap = SubstitutionMap::get(genericSig, replacementTypes,
+                                     LookUpConformanceInModule());
 
   SmallVector<ManagedValue, 2> resultScalars;
   emitApplyOfLibraryIntrinsic(loc, converter, subMap, array, SGFContext())
@@ -6788,6 +6781,13 @@ RValue RValueEmitter::visitCurrentContextIsolationExpr(
   }
 
   return visit(E->getActor(), C);
+}
+
+RValue RValueEmitter::visitTypeValueExpr(TypeValueExpr *E, SGFContext C) {
+  auto paramType = E->getParamType()->getCanonicalType();
+
+  return RValue(SGF, E, ManagedValue::forObjectRValueWithoutOwnership(
+    SGF.B.createTypeValue(E, SGF.getLoweredType(E->getType()), paramType)));
 }
 
 ManagedValue

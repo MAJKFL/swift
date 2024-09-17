@@ -670,6 +670,10 @@ class BuildScriptInvocation(object):
         builder.add_product(products.WasmSwiftSDK,
                             is_enabled=self.args.build_wasmstdlib)
 
+        builder.add_product(products.SwiftTestingMacros,
+                            is_enabled=self.args.build_swift_testing_macros)
+        builder.add_product(products.SwiftTesting,
+                            is_enabled=self.args.build_swift_testing)
         builder.add_product(products.SwiftPM,
                             is_enabled=self.args.build_swiftpm)
         builder.add_product(products.SwiftFoundationTests,
@@ -678,10 +682,6 @@ class BuildScriptInvocation(object):
                             is_enabled=self.args.build_foundation)
         builder.add_product(products.SwiftSyntax,
                             is_enabled=self.args.build_swiftsyntax)
-        builder.add_product(products.SwiftTestingMacros,
-                            is_enabled=self.args.build_swift_testing_macros)
-        builder.add_product(products.SwiftTesting,
-                            is_enabled=self.args.build_swift_testing)
         builder.add_product(products.SwiftFormat,
                             is_enabled=self.args.build_swiftformat)
         builder.add_product(products.SKStressTester,
@@ -700,10 +700,18 @@ class BuildScriptInvocation(object):
                             is_enabled=self.args.tsan_libdispatch_test)
         builder.add_product(products.SwiftDocC,
                             is_enabled=self.args.build_swiftdocc)
-        builder.add_product(products.SwiftDocCRender,
-                            is_enabled=self.args.install_swiftdocc)
         builder.add_product(products.MinimalStdlib,
                             is_enabled=self.args.build_minimalstdlib)
+
+        # Swift-DocC-Render should be installed whenever Swift-DocC is installed, which
+        # can be either given directly or via install-all
+        install_doccrender = self.args.install_swiftdocc or (
+            self.args.install_all and self.args.build_swiftdocc
+        )
+        builder.add_product(products.SwiftDocCRender,
+                            is_enabled=install_doccrender)
+        builder.add_product(products.StdlibDocs,
+                            is_enabled=self.args.build_stdlib_docs)
 
         # Keep SwiftDriver at last.
         # swift-driver's integration with the build scripts is not fully

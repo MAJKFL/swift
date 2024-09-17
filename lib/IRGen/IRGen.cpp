@@ -222,7 +222,8 @@ void swift::performLLVMOptimizations(const IRGenOptions &Opts,
     PTO.LoopVectorization = true;
     PTO.SLPVectorization = true;
     PTO.MergeFunctions = true;
-    DoHotColdSplit = Opts.EnableHotColdSplit;
+    // Splitting trades code size to enhance memory locality, avoid in -Osize.
+    DoHotColdSplit = Opts.EnableHotColdSplit && !Opts.optimizeForSize();
     level = llvm::OptimizationLevel::Os;
   } else {
     level = llvm::OptimizationLevel::O0;
@@ -269,12 +270,14 @@ void swift::performLLVMOptimizations(const IRGenOptions &Opts,
           if (Level != OptimizationLevel::O0)
             FPM.addPass(SwiftARCOptPass());
         });
-    PB.registerOptimizerLastEPCallback([](ModulePassManager &MPM,
+    PB.registerOptimizerLastEPCallback([&](ModulePassManager &MPM,
                                           OptimizationLevel Level) {
       if (Level != OptimizationLevel::O0)
         MPM.addPass(createModuleToFunctionPassAdaptor(SwiftARCContractPass()));
       if (Level == OptimizationLevel::O0)
         MPM.addPass(AlwaysInlinerPass());
+      if (Opts.EmitAsyncFramePushPopMetadata)
+        MPM.addPass(AsyncEntryReturnMetadataPass());
     });
   }
 

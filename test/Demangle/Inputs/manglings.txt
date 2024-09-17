@@ -362,7 +362,8 @@ $S18resilient_protocol21ResilientBaseProtocolTL ---> protocol requirements base 
 $S1t1PP10AssocType2_AA1QTn ---> associated conformance descriptor for t.P.AssocType2: t.Q
 $S1t1PP10AssocType2_AA1QTN ---> default associated conformance accessor for t.P.AssocType2: t.Q
 $s4Test6testityyxlFAA8MystructV_TB5 ---> generic specialization <Test.Mystruct> of Test.testit<A>(A) -> ()
-$sSUss17FixedWidthIntegerRzrlEyxqd__cSzRd__lufCSu_SiTgm5 ---> generic specialization <Swift.UInt, Swift.Int> of (extension in Swift):Swift.UnsignedInteger< where A: Swift.FixedWidthInteger>.init<A where A1: Swift.BinaryInteger>(A1) -> A
+$sSUss17FixedWidthIntegerRzrlEyxqd__cSzRd__lufCSu_SiTg5 ---> generic specialization <Swift.UInt, Swift.Int> of (extension in Swift):Swift.UnsignedInteger< where A: Swift.FixedWidthInteger>.init<A where A1: Swift.BinaryInteger>(A1) -> A
+$s4test7genFuncyyx_q_tr0_lFSi_SbTtt1g5 ---> generic specialization <Swift.Int, Swift.Bool> of test.genFunc<A, B>(A, B) -> ()
 $sSD5IndexVy__GD ---> $sSD5IndexVy__GD
 $s4test3StrCACycfC ---> {T:$s4test3StrCACycfc} test.Str.__allocating_init() -> test.Str
 $s18keypaths_inlinable13KeypathStructV8computedSSvpACTKq  ---> key path getter for keypaths_inlinable.KeypathStruct.computed : Swift.String : keypaths_inlinable.KeypathStruct, serialized
@@ -472,6 +473,3 @@ $s23variadic_generic_opaque2G2VyAA2S1V_AA2S2VQPGAA1PHPAeA1QHPyHC_AgaJHPyHCHX_HC 
 
 $s9MacroUser0023macro_expandswift_elFCffMX436_4_23bitwidthNumberedStructsfMf_ ---> freestanding macro expansion #1 of bitwidthNumberedStructs in module MacroUser file macro_expand.swift line 437 column 5
 $sxq_IyXd_D ---> @callee_unowned (@in_cxx A) -> (@unowned B)
-$s32def_implicit_lifetime_dependence6deriveyAA10BufferViewVYliS_ADF ---> def_implicit_lifetime_dependence.derive(def_implicit_lifetime_dependence.BufferView) -> inherit lifetime dependence: {0} def_implicit_lifetime_dependence.BufferView
-$s32def_explicit_lifetime_dependence16deriveThisOrThatyAA10BufferViewVYlsSS_AD_ADtF ---> def_explicit_lifetime_dependence.deriveThisOrThat(def_explicit_lifetime_dependence.BufferView, def_explicit_lifetime_dependence.BufferView) -> scope lifetime dependence: {0, 1} def_explicit_lifetime_dependence.BufferView
-$s39explicit_lifetime_dependence_specifiers17deriveThisOrThat2yAA10BufferViewVYliUS_YlsSU_AD_ADntF ---> explicit_lifetime_dependence_specifiers.deriveThisOrThat2(explicit_lifetime_dependence_specifiers.BufferView, __owned explicit_lifetime_dependence_specifiers.BufferView) -> scope lifetime dependence: {0} inherit lifetime dependence: {1} explicit_lifetime_dependence_specifiers.BufferView

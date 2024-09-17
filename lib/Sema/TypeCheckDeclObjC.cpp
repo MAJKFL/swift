@@ -153,7 +153,12 @@ void ObjCReason::describe(const Decl *D) const {
 }
 
 void ObjCReason::setAttrInvalid() const {
-  if (requiresAttr(kind))
+  if (!requiresAttr(kind))
+    return;
+
+  if (kind == MemberOfObjCImplementationExtension)
+    cast<ObjCImplementationAttr>(getAttr())->setHasInvalidImplicitLangAttrs();
+  else
     getAttr()->setInvalid();
 }
 
@@ -517,15 +522,21 @@ static VersionRange getMinOSVersionForClassStubs(const llvm::Triple &target) {
   return VersionRange::all();
 }
 
-static bool checkObjCClassStubAvailability(ASTContext &ctx, const Decl *decl) {
-  auto minRange = getMinOSVersionForClassStubs(ctx.LangOpts.Target);
+static AvailabilityRange getObjCClassStubAvailability(ASTContext &ctx) {
+  // FIXME: This should just be ctx.getSwift51Availability(), but that breaks
+  // tests on arm64 arches.
+  return AvailabilityRange(getMinOSVersionForClassStubs(ctx.LangOpts.Target));
+}
 
-  auto targetRange = AvailabilityContext::forDeploymentTarget(ctx);
-  if (targetRange.getOSVersion().isContainedIn(minRange))
+static bool checkObjCClassStubAvailability(ASTContext &ctx, const Decl *decl) {
+  auto stubAvailability = getObjCClassStubAvailability(ctx);
+
+  auto deploymentTarget = AvailabilityRange::forDeploymentTarget(ctx);
+  if (deploymentTarget.isContainedIn(stubAvailability))
     return true;
 
-  auto declRange = AvailabilityInference::availableRange(decl, ctx);
-  return declRange.getOSVersion().isContainedIn(minRange);
+  auto declAvailability = AvailabilityInference::availableRange(decl, ctx);
+  return declAvailability.isContainedIn(stubAvailability);
 }
 
 static const ClassDecl *getResilientAncestor(ModuleDecl *mod,
@@ -568,16 +579,14 @@ static bool checkObjCInExtensionContext(const ValueDecl *value,
               AncestryFlags::ResilientOther) ||
             classDecl->hasResilientMetadata(mod,
                                             ResilienceExpansion::Maximal)) {
-          auto &target = ctx.LangOpts.Target;
-          auto platform = prettyPlatformString(targetPlatform(ctx.LangOpts));
-          auto range = getMinOSVersionForClassStubs(target);
+          auto stubAvailability = getObjCClassStubAvailability(ctx);
           auto *ancestor = getResilientAncestor(mod, classDecl);
           softenIfAccessNote(value, reason.getAttr(),
             value->diagnose(diag::objc_in_resilient_extension,
                             value->getDescriptiveKind(),
                             ancestor->getName(),
-                            platform,
-                            range.getLowerEndpoint())
+                            ctx.getTargetPlatformStringForDiagnostics(),
+                            stubAvailability.getRawMinimumVersion())
                 .limitBehavior(behavior));
           reason.describe(value);
           return true;
@@ -1317,17 +1326,13 @@ static std::optional<ObjCReason> shouldMarkClassAsObjC(const ClassDecl *CD) {
         return std::nullopt;
       }
 
-
-      auto &target = ctx.LangOpts.Target;
-      auto platform = prettyPlatformString(targetPlatform(ctx.LangOpts));
-      auto range = getMinOSVersionForClassStubs(target);
+      auto stubAvailability = getObjCClassStubAvailability(ctx);
       auto *ancestor = getResilientAncestor(CD->getParentModule(), CD);
-      swift::diagnoseAndRemoveAttr(CD, attr,
-                                   diag::objc_for_resilient_class,
+      swift::diagnoseAndRemoveAttr(CD, attr, diag::objc_for_resilient_class,
                                    ancestor->getName(),
-                                   platform,
-                                   range.getLowerEndpoint())
-        .limitBehavior(behavior);
+                                   ctx.getTargetPlatformStringForDiagnostics(),
+                                   stubAvailability.getRawMinimumVersion())
+          .limitBehavior(behavior);
       reason.describe(CD);
     }
 
@@ -1749,7 +1754,7 @@ static ObjCSelector inferObjCName(ValueDecl *decl) {
                                 diag::objc_override_method_selector_mismatch,
                                 *attr->getName(), overriddenSelector)
                       .limitBehavior(behavior));
-              fixDeclarationObjCName(diag, decl, attr->getName(),
+              fixDeclarationObjCName(diag, decl, attr->getName().value(),
                                      overriddenSelector);
             }
 
@@ -1839,8 +1844,9 @@ static ObjCSelector inferObjCName(ValueDecl *decl) {
         auto diag = decl->diagnose(diag::objc_ambiguous_inference_candidate,
                                    req, proto, *req->getObjCRuntimeName());
         fixDeclarationObjCName(diag, decl,
-                               decl->getObjCRuntimeName(/*skipIsObjC=*/true),
-                               req->getObjCRuntimeName());
+                               decl->getObjCRuntimeName(/*skipIsObjC=*/true)
+                                 .value_or(ObjCSelector()),
+                               req->getObjCRuntimeName().value());
       };
       diagnoseCandidate(firstReq);
       diagnoseCandidate(req);
@@ -2151,8 +2157,8 @@ bool swift::fixDeclarationName(InFlightDiagnostic &diag, const ValueDecl *decl,
 
 bool swift::fixDeclarationObjCName(InFlightDiagnostic &diag,
                                    const Decl *decl,
-                                   std::optional<ObjCSelector> nameOpt,
-                                   std::optional<ObjCSelector> targetNameOpt,
+                                   ObjCSelector name,
+                                   ObjCSelector targetName,
                                    bool ignoreImpliedName) {
   if (decl->isImplicit())
     return false;
@@ -2163,9 +2169,6 @@ bool swift::fixDeclarationObjCName(InFlightDiagnostic &diag,
                      "@objc ");
     return false;
   }
-
-  auto name = *nameOpt;
-  auto targetName = *targetNameOpt;
 
   // Dig out the existing '@objc' attribute on the witness. We don't care
   // about implicit ones because they don't have useful source location
@@ -2213,7 +2216,7 @@ bool swift::fixDeclarationObjCName(InFlightDiagnostic &diag,
 
     // If the names of the witness and requirement differ, we need to
     // specify the name.
-    if (name != targetName || ignoreImpliedName) {
+    if (targetName && (name != targetName || ignoreImpliedName)) {
       out << "(";
       out << targetName;
       out << ")";
@@ -2908,8 +2911,10 @@ bool swift::diagnoseObjCUnsatisfiedOptReqConflicts(SourceFile &sf) {
       // Fix the '@objc' attribute, if needed.
       if (!bestConflict->canInferObjCFromRequirement(req))
         fixDeclarationObjCName(diag, bestConflict,
-                               bestConflict->getObjCRuntimeName(),
-                               req->getObjCRuntimeName(),
+                               bestConflict->getObjCRuntimeName()
+                                  .value_or(ObjCSelector()),
+                               req->getObjCRuntimeName()
+                                  .value_or(ObjCSelector()),
                                /*ignoreImpliedName=*/true);
     }
 
@@ -3074,6 +3079,17 @@ class ObjCImplementationChecker {
 
   bool hasDiagnosed = false;
 
+  bool hasInvalidLangAttr(ValueDecl *cand) {
+    // If isObjC() found a problem, it will have set the invalid bit on either
+    // the candidate's ObjCAttr, if it has one, or the controlling
+    // ObjCImplementationAttr otherwise.
+    if (auto objc = cand->getAttrs()
+                            .getAttribute<ObjCAttr>(/*AllowInvalid=*/true))
+      return objc->isInvalid();
+
+    return getAttr()->hasInvalidImplicitLangAttrs() || getAttr()->isInvalid();
+  }
+
 public:
   ObjCImplementationChecker(Decl *D)
       : decl(D), hasDiagnosed(getAttr()->isInvalid())
@@ -3158,18 +3174,11 @@ private:
       return;
 
     // Don't diagnose if we already diagnosed an unrelated ObjC interop issue,
-    // like an un-representable type. If there's an `@objc` attribute on the
-    // member, this will be indicated by its `isInvalid()` bit; otherwise we'll
-    // use the enclosing extension's `@_objcImplementation` attribute.
-    DeclAttribute *attr = afd->getAttrs()
-                              .getAttribute<ObjCAttr>(/*AllowInvalid=*/true);
-    if (!attr)
-      attr = member->getDeclContext()->getAsDecl()->getAttrs()
-                 .getAttribute<ObjCImplementationAttr>(/*AllowInvalid=*/true);
-    assert(attr && "expected @_objcImplementation on context of member checked "
-                   "by ObjCImplementationChecker");
-    if (attr->isInvalid())
+    // like an un-representable type.
+    if (hasInvalidLangAttr(member)) {
+      hasDiagnosed = true;
       return;
+    }
 
     if (auto init = dyn_cast<ConstructorDecl>(afd)) {
       if (!init->isObjC() && (init->isRequired() ||
@@ -3278,12 +3287,12 @@ private:
     return ObjCSelector();
   }
 
-  static std::optional<ObjCSelector> getObjCName(ValueDecl *VD) {
+  static ObjCSelector getObjCName(ValueDecl *VD) {
     if (!VD->getCDeclName().empty()) {
       auto ident = VD->getASTContext().getIdentifier(VD->getCDeclName());
       return ObjCSelector(VD->getASTContext(), 0, { ident });
     }
-    return VD->getObjCRuntimeName();
+    return VD->getObjCRuntimeName().value_or(ObjCSelector());
   }
 
 public:
@@ -3428,8 +3437,8 @@ private:
       for (auto req : matchedRequirements.matches) {
         auto diag =
             diagnose(cand, diag::objc_implementation_one_matched_requirement,
-                           req, *getObjCName(req), shouldOfferFix,
-                           getObjCName(req)->getString(scratch));
+                           req, getObjCName(req), shouldOfferFix,
+                           getObjCName(req).getString(scratch));
         if (shouldOfferFix) {
           fixDeclarationObjCName(diag, cand, getObjCName(cand),
                                  getObjCName(req), /*ignoreImpliedName=*/true);
@@ -3469,14 +3478,14 @@ private:
       auto ext =
           cast<ExtensionDecl>(reqIDC->getImplementationContext());
       diagnose(ext, diag::objc_implementation_multiple_matching_candidates,
-                    req, *getObjCName(req));
+                    req, getObjCName(req));
 
       for (auto cand : cands.matches) {
         bool shouldOfferFix = !unmatchedCandidates[cand];
         auto diag =
             diagnose(cand, diag::objc_implementation_candidate_impl_here,
                            cand, shouldOfferFix,
-                           getObjCName(req)->getString(scratch));
+                           getObjCName(req).getString(scratch));
 
         if (shouldOfferFix) {
           fixDeclarationObjCName(diag, cand, getObjCName(cand),
@@ -3651,7 +3660,14 @@ private:
 
   void diagnoseOutcome(MatchOutcome outcome, ValueDecl *req, ValueDecl *cand,
                        ObjCSelector explicitObjCName) {
-    auto reqObjCName = *getObjCName(req);
+    // If the candidate was invalid, we've already diagnosed the likely cause of
+    // the mismatch. Don't dogpile.
+    if (hasInvalidLangAttr(cand)) {
+      hasDiagnosed = true;
+      return;
+    }
+
+    auto reqObjCName = getObjCName(req);
 
     switch (outcome) {
     case MatchOutcome::NoRelationship:
@@ -3668,7 +3684,7 @@ private:
     case MatchOutcome::WrongImplicitObjCName:
     case MatchOutcome::WrongExplicitObjCName: {
       auto diag = diagnose(cand, diag::objc_implementation_wrong_objc_name,
-                           *getObjCName(cand), cand, reqObjCName);
+                           getObjCName(cand), cand, reqObjCName);
       fixDeclarationObjCName(diag, cand, explicitObjCName, reqObjCName);
       return;
     }

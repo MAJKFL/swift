@@ -34,6 +34,7 @@
 #include "DerivedConformances.h"
 #include "TypeAccessScopeChecker.h"
 #include "TypeChecker.h"
+#include "TypeCheckType.h"
 
 #include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/Decl.h"
@@ -330,7 +331,18 @@ static void recordTypeWitness(NormalProtocolConformance *conformance,
 
     // Construct the availability of the type witnesses based on the
     // availability of the enclosing type and the associated type.
-    const Decl *availabilitySources[2] = { dc->getAsDecl(), assocType };
+    llvm::SmallVector<Decl *, 2> availabilitySources = {dc->getAsDecl()};
+
+    // Only constrain the availability of the typealias by the availability of
+    // the associated type if the associated type is less available than its
+    // protocol. This is required for source compatibility.
+    auto protoAvailability = AvailabilityInference::availableRange(proto, ctx);
+    auto assocTypeAvailability =
+        AvailabilityInference::availableRange(assocType, ctx);
+    if (protoAvailability.isSupersetOf(assocTypeAvailability)) {
+      availabilitySources.push_back(assocType);
+    }
+
     AvailabilityInference::applyInferredAvailableAttrs(
         aliasDecl, availabilitySources, ctx);
 
@@ -342,6 +354,22 @@ static void recordTypeWitness(NormalProtocolConformance *conformance,
     }
 
     typeDecl = aliasDecl;
+  }
+
+  // If we're disallowing unsafe code, check for an unsafe type witness.
+  if (ctx.LangOpts.hasFeature(Feature::WarnUnsafe) &&
+      !assocType->isUnsafe() && type->isUnsafe()) {
+    SourceLoc loc = typeDecl->getLoc();
+    if (loc.isInvalid())
+      loc = conformance->getLoc();
+    diagnoseUnsafeType(ctx,
+                       loc,
+                       type,
+                       [&](Type specificType) {
+      ctx.Diags.diagnose(
+          loc, diag::type_witness_unsafe, specificType, assocType->getName());
+      assocType->diagnose(diag::decl_declared_here, assocType);
+    });
   }
 
   // Record the type witness.
@@ -2420,38 +2448,38 @@ AssociatedTypeInference::computeFailureTypeWitness(
   // Look for AsyncIteratorProtocol.next() and infer the Failure type from
   // it.
   for (const auto &witness : valueWitnesses) {
-    if (isAsyncIteratorProtocolNext(witness.first)) {
-      // We use a dyn_cast_or_null since we can get a nullptr here if we fail to
-      // match a witness. In such a case, we should just fail here.
-      if (auto witnessFunc = dyn_cast_or_null<AbstractFunctionDecl>(witness.second)) {
-        auto thrownError = witnessFunc->getEffectiveThrownErrorType();
+    if (!isAsyncIteratorProtocolNext(witness.first))
+      continue;
 
-        // If it doesn't throw, Failure == Never.
-        if (!thrownError)
-          return AbstractTypeWitness(assocType, ctx.getNeverType());
+    if (!witness.second || witness.second->getDeclContext() != dc)
+      continue;
 
-        // If it isn't 'rethrows', use the thrown error type;.
-        if (!witnessFunc->getAttrs().hasAttribute<RethrowsAttr>()) {
-          return AbstractTypeWitness(assocType,
-                                     dc->mapTypeIntoContext(*thrownError));
-        }
+    if (auto witnessFunc = dyn_cast<AbstractFunctionDecl>(witness.second)) {
+      auto thrownError = witnessFunc->getEffectiveThrownErrorType();
 
-        for (auto req : witnessFunc->getGenericSignature().getRequirements()) {
-          if (req.getKind() == RequirementKind::Conformance) {
-            auto proto = req.getProtocolDecl();
-            if (proto->isSpecificProtocol(KnownProtocolKind::AsyncIteratorProtocol) ||
-                proto->isSpecificProtocol(KnownProtocolKind::AsyncSequence)) {
-              auto failureAssocType = proto->getAssociatedType(ctx.Id_Failure);
-              auto failureType = DependentMemberType::get(req.getFirstType(), failureAssocType);
-              return AbstractTypeWitness(assocType, dc->mapTypeIntoContext(failureType));
-            }
-          }
-        }
+      // If it doesn't throw, Failure == Never.
+      if (!thrownError)
+        return AbstractTypeWitness(assocType, ctx.getNeverType());
 
-        return AbstractTypeWitness(assocType, ctx.getErrorExistentialType());
+      // If it isn't 'rethrows', use the thrown error type;.
+      if (!witnessFunc->getAttrs().hasAttribute<RethrowsAttr>()) {
+        return AbstractTypeWitness(assocType,
+                                   dc->mapTypeIntoContext(*thrownError));
       }
 
-      break;
+      for (auto req : witnessFunc->getGenericSignature().getRequirements()) {
+        if (req.getKind() == RequirementKind::Conformance) {
+          auto proto = req.getProtocolDecl();
+          if (proto->isSpecificProtocol(KnownProtocolKind::AsyncIteratorProtocol) ||
+              proto->isSpecificProtocol(KnownProtocolKind::AsyncSequence)) {
+            auto failureAssocType = proto->getAssociatedType(ctx.Id_Failure);
+            auto failureType = DependentMemberType::get(req.getFirstType(), failureAssocType);
+            return AbstractTypeWitness(assocType, dc->mapTypeIntoContext(failureType));
+          }
+        }
+      }
+
+      return AbstractTypeWitness(assocType, ctx.getErrorExistentialType());
     }
   }
 
@@ -3379,9 +3407,8 @@ static Comparison compareDeclsForInference(DeclContext *DC, ValueDecl *decl1,
   if (!sig1 || !sig2)
     return TypeChecker::compareDeclarations(DC, decl1, decl2);
 
-  auto selfParam = GenericTypeParamType::get(/*isParameterPack*/ false,
-                                             /*depth*/ 0, /*index*/ 0,
-                                             decl1->getASTContext());
+  auto selfParam = GenericTypeParamType::getType(/*depth*/ 0, /*index*/ 0,
+                                                 decl1->getASTContext());
 
   // Collect the protocols required by extension 1.
   Type class1;

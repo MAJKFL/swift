@@ -155,6 +155,7 @@ namespace {
     using super::asImpl;
 
   public:
+
     const FieldInfoType &getFieldInfo(VarDecl *field) const {
       // FIXME: cache the physical field index in the VarDecl.
       for (auto &fieldInfo : asImpl().getFields()) {
@@ -275,9 +276,15 @@ namespace {
 
     void destroy(IRGenFunction &IGF, Address address, SILType T,
                  bool isOutlined) const override {
+
       // If the struct has a deinit declared, then call it to destroy the
       // value.
       if (!tryEmitDestroyUsingDeinit(IGF, address, T)) {
+        if (!asImpl().areFieldsABIAccessible()) {
+          emitDestroyCall(IGF, T, address);
+          return;
+        }
+
         // Otherwise, perform elementwise destruction of the value.
         super::destroy(IGF, address, T, isOutlined);
       }
@@ -390,11 +397,11 @@ namespace {
                                 Alignment align,
                                 const clang::RecordDecl *clangDecl)
         : StructTypeInfoBase(StructTypeInfoKind::LoadableClangRecordTypeInfo,
-                             fields, explosionSize, storageType, size,
-                             std::move(spareBits), align,
+                             fields, explosionSize, FieldsAreABIAccessible,
+                             storageType, size, std::move(spareBits), align,
                              IsTriviallyDestroyable,
                              IsCopyable,
-                             IsFixedSize),
+                             IsFixedSize, IsABIAccessible),
           ClangDecl(clangDecl) {}
 
     TypeLayoutEntry
@@ -484,13 +491,14 @@ namespace {
                                          Alignment align,
                                          const clang::RecordDecl *clangDecl)
         : StructTypeInfoBase(StructTypeInfoKind::AddressOnlyClangRecordTypeInfo,
-                             fields, storageType, size,
+                             fields, FieldsAreABIAccessible, storageType, size,
                              // We can't assume any spare bits in a C++ type
                              // with user-defined special member functions.
                              SpareBitVector(std::optional<APInt>{
                                  llvm::APInt(size.getValueInBits(), 0)}),
                              align, IsNotTriviallyDestroyable,
-                             IsNotBitwiseTakable, IsCopyable, IsFixedSize),
+                             IsNotBitwiseTakable, IsCopyable, IsFixedSize,
+                             IsABIAccessible),
           clangDecl(clangDecl) {
       (void)clangDecl;
     }
@@ -666,7 +674,7 @@ namespace {
                                       Alignment align,
                                       const clang::RecordDecl *clangDecl)
         : StructTypeInfoBase(StructTypeInfoKind::AddressOnlyClangRecordTypeInfo,
-                             fields, storageType, size,
+                             fields, FieldsAreABIAccessible, storageType, size,
                              // We can't assume any spare bits in a C++ type
                              // with user-defined special member functions.
                              SpareBitVector(std::optional<APInt>{
@@ -675,7 +683,7 @@ namespace {
                              IsNotBitwiseTakable,
                              // TODO: Set this appropriately for the type's
                              // C++ import behavior.
-                             IsCopyable, IsFixedSize),
+                             IsCopyable, IsFixedSize, IsABIAccessible),
           ClangDecl(clangDecl) {
       (void)ClangDecl;
     }
@@ -865,21 +873,24 @@ namespace {
   class LoadableStructTypeInfo final
       : public StructTypeInfoBase<LoadableStructTypeInfo, LoadableTypeInfo> {
     using super = StructTypeInfoBase<LoadableStructTypeInfo, LoadableTypeInfo>;
+
   public:
     LoadableStructTypeInfo(ArrayRef<StructFieldInfo> fields,
+                           FieldsAreABIAccessible_t areFieldsABIAccessible,
                            unsigned explosionSize,
                            llvm::Type *storageType, Size size,
                            SpareBitVector &&spareBits,
                            Alignment align,
                            IsTriviallyDestroyable_t isTriviallyDestroyable,
                            IsCopyable_t isCopyable,
-                           IsFixedSize_t alwaysFixedSize)
+                           IsFixedSize_t alwaysFixedSize,
+                           IsABIAccessible_t isABIAccessible)
       : StructTypeInfoBase(StructTypeInfoKind::LoadableStructTypeInfo,
-                           fields, explosionSize,
+                           fields, explosionSize, areFieldsABIAccessible,
                            storageType, size, std::move(spareBits),
                            align, isTriviallyDestroyable,
                            isCopyable,
-                           alwaysFixedSize)
+                           alwaysFixedSize, isABIAccessible)
     {}
 
     void addToAggLowering(IRGenModule &IGM, SwiftAggLowering &lowering,
@@ -947,7 +958,14 @@ namespace {
       if (tryEmitConsumeUsingDeinit(IGF, explosion, T)) {
         return;
       }
-      
+
+      if (!areFieldsABIAccessible()) {
+        auto temporary = allocateStack(IGF, T, "deinit.arg").getAddress();
+        initialize(IGF, explosion, temporary, /*outlined*/false);
+        emitDestroyCall(IGF, T, temporary);
+        return;
+      }
+
       // Otherwise, do elementwise destruction of the value.
       return super::consume(IGF, explosion, atomicity, T);
     }
@@ -960,17 +978,21 @@ namespace {
                                                    FixedTypeInfo>> {
   public:
     // FIXME: Spare bits between struct members.
-    FixedStructTypeInfo(ArrayRef<StructFieldInfo> fields, llvm::Type *T,
+    FixedStructTypeInfo(ArrayRef<StructFieldInfo> fields,
+                        FieldsAreABIAccessible_t areFieldsABIAccessible,
+                        llvm::Type *T,
                         Size size, SpareBitVector &&spareBits,
                         Alignment align,
                         IsTriviallyDestroyable_t isTriviallyDestroyable,
                         IsBitwiseTakable_t isBT,
                         IsCopyable_t isCopyable,
-                        IsFixedSize_t alwaysFixedSize)
+                        IsFixedSize_t alwaysFixedSize,
+                        IsABIAccessible_t isABIAccessible)
       : StructTypeInfoBase(StructTypeInfoKind::FixedStructTypeInfo,
-                           fields, T, size, std::move(spareBits), align,
+                           fields, areFieldsABIAccessible,
+                           T, size, std::move(spareBits), align,
                            isTriviallyDestroyable, isBT, isCopyable,
-                           alwaysFixedSize)
+                           alwaysFixedSize, isABIAccessible)
     {}
 
     TypeLayoutEntry
@@ -985,32 +1007,31 @@ namespace {
         return IGM.typeLayoutCache.getOrCreateResilientEntry(T);
       }
 
-      auto decl = T.getASTType()->getStructOrBoundGenericStruct();
-      auto rawLayout = decl->getAttrs().getAttribute<RawLayoutAttr>();
-
       // If we have a raw layout struct who is fixed size, it means the
       // layout of the struct is fully concrete.
-      if (rawLayout) {
+      if (auto rawLayout = T.getRawLayout()) {
         // Defer to this fixed type info for type layout if the raw layout
         // specifies size and alignment.
         if (rawLayout->getSizeAndAlignment()) {
           return IGM.typeLayoutCache.getOrCreateTypeInfoBasedEntry(*this, T);
         }
 
-        auto likeType = rawLayout->getResolvedLikeType(decl)->getCanonicalType();
-        SILType loweredLikeType = IGM.getLoweredType(likeType);
-
-        // The given struct type T that we're building is fully concrete, but
-        // our like type is still in terms of the potential archetype of the
-        // type.
-        auto subs = T.getASTType()->getContextSubstitutionMap(decl);
-
-        loweredLikeType = loweredLikeType.subst(IGM.getSILModule(), subs);
-
-        // Array like raw layouts are still handled correctly even though the
-        // type layout entry is only that of the like type.
-        return IGM.getTypeInfo(loweredLikeType)
+        auto likeType = T.getRawLayoutSubstitutedLikeType();
+        auto loweredLikeType = IGM.getLoweredType(likeType);
+        auto likeTypeLayout = IGM.getTypeInfo(loweredLikeType)
             .buildTypeLayoutEntry(IGM, loweredLikeType, useStructLayouts);
+
+        // If we're an array, use the ArrayLayoutEntry.
+        if (rawLayout->getArrayLikeTypeAndCount()) {
+          auto countType = T.getRawLayoutSubstitutedCountType()->getCanonicalType();
+          return IGM.typeLayoutCache.getOrCreateArrayEntry(likeTypeLayout,
+                                                           loweredLikeType,
+                                                           countType);
+        }
+
+        // Otherwise, this is just going to use the same layout entry as the
+        // like type.
+        return likeTypeLayout;
       }
 
       std::vector<TypeLayoutEntry *> fields;
@@ -1105,32 +1126,30 @@ namespace {
         return IGM.typeLayoutCache.getOrCreateResilientEntry(T);
       }
 
-      auto decl = T.getASTType()->getStructOrBoundGenericStruct();
-      auto rawLayout = decl->getAttrs().getAttribute<RawLayoutAttr>();
-
       // If we have a raw layout struct who is non-fixed size, it means the
       // layout of the struct is dependent on the archetype of the thing it's
       // like.
-      if (rawLayout) {
+      if (auto rawLayout = T.getRawLayout()) {
         // Note: We don't have to handle the size and alignment case here for
         // raw layout because those are always fixed, so only dependent layouts
         // will be non-fixed.
 
-        auto likeType = rawLayout->getResolvedLikeType(decl)->getCanonicalType();
-        SILType loweredLikeType = IGM.getLoweredType(likeType);
-
-        // The given struct type T that we're building may be in a generic
-        // environment that is different than that which was built our
-        // resolved rawLayout like type. Map our like type into the given
-        // environment.
-        auto subs = T.getASTType()->getContextSubstitutionMap(decl);
-
-        loweredLikeType = loweredLikeType.subst(IGM.getSILModule(), subs);
-
-        // Array like raw layouts are still handled correctly even though the
-        // type layout entry is only that of the like type.
-        return IGM.getTypeInfo(loweredLikeType)
+        auto likeType = T.getRawLayoutSubstitutedLikeType();
+        auto loweredLikeType = IGM.getLoweredType(likeType->getCanonicalType());
+        auto likeTypeLayout = IGM.getTypeInfo(loweredLikeType)
             .buildTypeLayoutEntry(IGM, loweredLikeType, useStructLayouts);
+
+        // If we're an array, use the ArrayLayoutEntry.
+        if (rawLayout->getArrayLikeTypeAndCount()) {
+          auto countType = T.getRawLayoutSubstitutedCountType()->getCanonicalType();
+          return IGM.typeLayoutCache.getOrCreateArrayEntry(likeTypeLayout,
+                                                           loweredLikeType,
+                                                           countType);
+        }
+
+        // Otherwise, this is just going to use the same layout entry as the
+        // like type.
+        return likeTypeLayout;
       }
 
       std::vector<TypeLayoutEntry *> fields;
@@ -1242,9 +1261,12 @@ namespace {
     }
 
     LoadableStructTypeInfo *createLoadable(ArrayRef<StructFieldInfo> fields,
+                                           FieldsAreABIAccessible_t areFieldsABIAccessible,
                                            StructLayout &&layout,
                                            unsigned explosionSize) {
+      auto isABIAccessible = isTypeABIAccessibleIfFixedSize(IGM, TheStruct);
       return LoadableStructTypeInfo::create(fields,
+                                            areFieldsABIAccessible,
                                             explosionSize,
                                             layout.getType(),
                                             layout.getSize(),
@@ -1252,23 +1274,28 @@ namespace {
                                             layout.getAlignment(),
                                             layout.isTriviallyDestroyable(),
                                             layout.isCopyable(),
-                                            layout.isAlwaysFixedSize());
+                                            layout.isAlwaysFixedSize(),
+                                            isABIAccessible);
     }
 
     FixedStructTypeInfo *createFixed(ArrayRef<StructFieldInfo> fields,
+                                     FieldsAreABIAccessible_t areFieldsABIAccessible,
                                      StructLayout &&layout) {
-      return FixedStructTypeInfo::create(fields, layout.getType(),
+      auto isABIAccessible = isTypeABIAccessibleIfFixedSize(IGM, TheStruct);
+      return FixedStructTypeInfo::create(fields, areFieldsABIAccessible,
+                                         layout.getType(),
                                          layout.getSize(),
                                          std::move(layout.getSpareBits()),
                                          layout.getAlignment(),
                                          layout.isTriviallyDestroyable(),
                                          layout.isBitwiseTakable(),
                                          layout.isCopyable(),
-                                         layout.isAlwaysFixedSize());
+                                         layout.isAlwaysFixedSize(),
+                                         isABIAccessible);
     }
 
     NonFixedStructTypeInfo *createNonFixed(ArrayRef<StructFieldInfo> fields,
-                                     FieldsAreABIAccessible_t fieldsAccessible,
+                                           FieldsAreABIAccessible_t fieldsAccessible,
                                            StructLayout &&layout) {
       auto structAccessible = IsABIAccessible_t(
         IGM.getSILModule().isTypeMetadataAccessible(TheStruct));

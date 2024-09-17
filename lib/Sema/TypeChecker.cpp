@@ -23,6 +23,7 @@
 #include "TypeCheckType.h"
 #include "CodeSynthesis.h"
 #include "MiscDiagnostics.h"
+#include "swift/AST/ASTBridging.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/Attr.h"
@@ -764,4 +765,37 @@ bool TypeChecker::diagnoseInvalidFunctionType(
   }
 
   return hadAnyError;
+}
+
+extern "C" intptr_t swift_ASTGen_evaluatePoundIfCondition(
+                        BridgedASTContext astContext,
+                        void *_Nonnull diagEngine,
+                        BridgedStringRef sourceFileBuffer,
+                        BridgedStringRef conditionText,
+                        bool);
+
+std::pair<bool, bool> EvaluateIfConditionRequest::evaluate(
+    Evaluator &evaluator, SourceFile *sourceFile, SourceRange conditionRange,
+    bool shouldEvaluate
+) const {
+  // FIXME: When we migrate to SwiftParser, use the parsed syntax tree.
+  ASTContext &ctx = sourceFile->getASTContext();
+  auto &sourceMgr = ctx.SourceMgr;
+
+  // Extract the full buffer containing the condition.
+  auto bufferID = sourceMgr.findBufferContainingLoc(conditionRange.Start);
+  StringRef sourceFileText = sourceMgr.getEntireTextForBuffer(bufferID);
+
+  // Extract the condition text from that buffer.
+  auto conditionCharRange = Lexer::getCharSourceRangeFromSourceRange(sourceMgr, conditionRange);
+  StringRef conditionText = sourceMgr.extractText(conditionCharRange, bufferID);
+
+  // Evaluate the condition.
+  intptr_t evalResult = swift_ASTGen_evaluatePoundIfCondition(
+      ctx, &ctx.Diags, sourceFileText, conditionText, shouldEvaluate
+  );
+
+  bool isActive = (evalResult & 0x01) != 0;
+  bool allowSyntaxErrors = (evalResult & 0x02) != 0;
+  return std::pair(isActive, allowSyntaxErrors);
 }

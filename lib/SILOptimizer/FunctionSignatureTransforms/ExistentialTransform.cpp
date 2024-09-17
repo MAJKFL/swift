@@ -295,8 +295,7 @@ void ExistentialTransform::convertExistentialArgTypesToGenericArgTypes(
       constraint = existential->getConstraintType()->getCanonicalType();
 
     /// Generate new generic parameter.
-    auto *NewGenericParam =
-        GenericTypeParamType::get(/*isParameterPack*/ false, Depth, GPIdx++, Ctx);
+    auto *NewGenericParam = GenericTypeParamType::getType(Depth, GPIdx++, Ctx);
     genericParams.push_back(NewGenericParam);
     Requirement NewRequirement(RequirementKind::Conformance, NewGenericParam,
                                constraint);
@@ -426,12 +425,9 @@ void ExistentialTransform::populateThunkBody() {
     if (iter != ArgToGenericTypeMap.end() &&
         it != ExistentialArgDescriptor.end()) {
       ExistentialTransformArgumentDescriptor &ETAD = it->second;
-      OpenedArchetypeType *Opened;
       auto OrigOperand = ThunkBody->getArgument(ArgDesc.Index);
       auto SwiftType = ArgDesc.Arg->getType().getASTType();
-      auto OpenedType =
-          SwiftType
-              ->openAnyExistentialType(Opened, F->getGenericSignature())
+      auto OpenedType = OpenedArchetypeType::getAny(SwiftType)
               ->getCanonicalType();
       auto OpenedSILType = NewF->getLoweredType(OpenedType);
       SILValue archetypeValue;

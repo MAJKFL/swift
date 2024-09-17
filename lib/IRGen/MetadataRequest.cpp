@@ -531,8 +531,7 @@ CanType IRGenModule::substOpaqueTypesWithUnderlyingTypes(CanType type) {
   // assume are constant.
   if (type->hasOpaqueArchetype()) {
     auto context = getMaximalTypeExpansionContext();
-    return swift::substOpaqueTypesWithUnderlyingTypes(type, context,
-                                                      /*allowLoweredTypes=*/false);
+    return swift::substOpaqueTypesWithUnderlyingTypes(type, context);
   }
 
   return type;
@@ -545,8 +544,7 @@ SILType IRGenModule::substOpaqueTypesWithUnderlyingTypes(
   if (type.getASTType()->hasOpaqueArchetype()) {
     auto context = getMaximalTypeExpansionContext();
     return SILType::getPrimitiveType(
-      swift::substOpaqueTypesWithUnderlyingTypes(type.getASTType(), context,
-                                                 /*allowLoweredTypes=*/true),
+      swift::substOpaqueTypesWithUnderlyingTypes(type.getASTType(), context),
       type.getCategory());
   }
 
@@ -561,8 +559,7 @@ IRGenModule::substOpaqueTypesWithUnderlyingTypes(CanType type,
   if (type->hasOpaqueArchetype()) {
     auto context = getMaximalTypeExpansionContext();
     return std::make_pair(
-       swift::substOpaqueTypesWithUnderlyingTypes(type, context,
-                                                  /*allowLoweredTypes=*/false),
+       swift::substOpaqueTypesWithUnderlyingTypes(type, context),
        swift::substOpaqueTypesWithUnderlyingTypes(conformance, type, context));
   }
 
@@ -2219,6 +2216,11 @@ namespace {
       llvm_unreachable("error type should not appear in IRGen");
     }
 
+    MetadataResponse visitIntegerType(CanIntegerType type,
+                                      DynamicMetadataRequest request) {
+      llvm_unreachable("integer type should not appear in IRGen");
+    }
+
     // These types are artificial types used for internal purposes and
     // should never appear in a metadata request.
 #define INTERNAL_ONLY_TYPE(ID)                                               \
@@ -3093,8 +3095,7 @@ static bool canIssueIncompleteMetadataRequests(IRGenModule &IGM) {
   // We can only answer blocking complete metadata requests with the <=5.1
   // runtime ABI entry points.
   auto &context = IGM.getSwiftModule()->getASTContext();
-  auto deploymentAvailability =
-      AvailabilityContext::forDeploymentTarget(context);
+  auto deploymentAvailability = AvailabilityRange::forDeploymentTarget(context);
   return deploymentAvailability.isContainedIn(
       context.getTypesInAbstractMetadataStateAvailability());
 }
@@ -3247,8 +3248,8 @@ emitMetadataAccessByMangledName(IRGenFunction &IGF, CanType type,
     stringAddr = subIGF.Builder.CreateIntToPtr(stringAddr, IGM.Int8PtrTy);
 
     llvm::CallInst *call;
-    bool signedDescriptor = IGM.getAvailabilityContext().isContainedIn(
-      IGM.Context.getSignedDescriptorAvailability());
+    bool signedDescriptor = IGM.getAvailabilityRange().isContainedIn(
+        IGM.Context.getSignedDescriptorAvailability());
     if (request.isStaticallyAbstract()) {
       call = signedDescriptor ?
         subIGF.Builder.CreateCall(
@@ -3582,6 +3583,15 @@ IRGenFunction::emitTypeMetadataRefForLayout(SILType ty,
   auto response = emitTypeMetadataRef(layoutEquivalentType, request);
   setScopedLocalTypeMetadataForLayout(ty.getObjectType(), response);
   return response.getMetadata();
+}
+
+llvm::Value *IRGenFunction::emitValueGenericRef(CanType type) {
+  if (auto integer = type->getAs<IntegerType>()) {
+    return llvm::ConstantInt::get(IGM.SizeTy,
+                    integer->getValue().zextOrTrunc(IGM.SizeTy->getBitWidth()));
+  }
+
+  return tryGetLocalTypeData(type, LocalTypeDataKind::forValue());
 }
 
 namespace {

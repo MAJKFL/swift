@@ -266,6 +266,9 @@ SWIFT_NAME("BridgedASTContext.langOptsGetCompilerVersion(self:_:)")
 SwiftInt BridgedASTContext_langOptsGetCompilerVersion(BridgedASTContext cContext,
                                                       SwiftInt* _Nullable * _Nonnull cComponents);
 
+/* Deallocate an array of Swift int values that was allocated in C++. */
+void deallocateIntBuffer(SwiftInt * _Nullable cComponents);
+
 enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedCanImportVersion : size_t {
   CanImportUnversioned,
   CanImportVersion,
@@ -399,7 +402,7 @@ struct BridgedPatternBindingEntry {
 // NOTE: This must be the same underlying value as C++ 'swift::DiagID' defined
 // in 'DiagnosticList.cpp'.
 enum ENUM_EXTENSIBILITY_ATTR(open) BridgedDiagID : uint32_t {
-#define DIAG(KIND, ID, Options, Text, Signature) BridgedDiagID_##ID,
+#define DIAG(KIND, ID, Group, Options, Text, Signature) BridgedDiagID_##ID,
 #include "swift/AST/DiagnosticsAll.def"
 };
 
@@ -1511,10 +1514,10 @@ BridgedDoCatchStmt BridgedDoCatchStmt_createParsed(
     BridgedNullableTypeRepr cThrownType, BridgedStmt cBody,
     BridgedArrayRef cCatches);
 
-SWIFT_NAME("BridgedFallthroughStmt.createParsed(_:loc:)")
+SWIFT_NAME("BridgedFallthroughStmt.createParsed(loc:declContext:)")
 BridgedFallthroughStmt
-BridgedFallthroughStmt_createParsed(BridgedASTContext cContext,
-                                    BridgedSourceLoc cLoc);
+BridgedFallthroughStmt_createParsed(BridgedSourceLoc cLoc,
+                                    BridgedDeclContext cDC);
 
 SWIFT_NAME("BridgedForEachStmt.createParsed(_:labelInfo:forLoc:tryLoc:awaitLoc:"
            "pattern:inLoc:sequence:whereLoc:whereExpr:body:)")
@@ -1904,6 +1907,15 @@ enum ENUM_EXTENSIBILITY_ATTR(open) BridgedMacroDefinitionKind : size_t {
   BridgedBuiltinIsolationMacro,
 };
 
+enum ENUM_EXTENSIBILITY_ATTR(closed) BridgedGenericTypeParamKind : size_t {
+  /// A regular generic type parameter: 'T'
+  BridgedGenericTypeParamKindType = 0,
+  /// A generic parameter pack: 'each T'
+  BridgedGenericTypeParamKindPack,
+  /// A generic value parameter: 'let T'
+  BridgedGenericTypeParamKindValue,
+};
+
 SWIFT_NAME("BridgedGenericParamList.createParsed(_:leftAngleLoc:parameters:"
            "genericWhereClause:rightAngleLoc:)")
 BridgedGenericParamList BridgedGenericParamList_createParsed(
@@ -1913,13 +1925,13 @@ BridgedGenericParamList BridgedGenericParamList_createParsed(
     BridgedSourceLoc cRightAngleLoc);
 
 SWIFT_NAME(
-    "BridgedGenericTypeParamDecl.createParsed(_:declContext:eachKeywordLoc:"
-    "name:nameLoc:inheritedType:index:)")
+    "BridgedGenericTypeParamDecl.createParsed(_:declContext:specifierLoc:"
+    "name:nameLoc:inheritedType:index:paramKind:)")
 BridgedGenericTypeParamDecl BridgedGenericTypeParamDecl_createParsed(
     BridgedASTContext cContext, BridgedDeclContext cDeclContext,
-    BridgedSourceLoc cEachLoc, BridgedIdentifier cName,
+    BridgedSourceLoc cSpecifierLoc, BridgedIdentifier cName,
     BridgedSourceLoc cNameLoc, BridgedNullableTypeRepr opaqueInheritedType,
-    size_t index);
+    size_t index, BridgedGenericTypeParamKind paramKind);
 
 SWIFT_NAME(
     "BridgedTrailingWhereClause.createParsed(_:whereKeywordLoc:requirements:)")

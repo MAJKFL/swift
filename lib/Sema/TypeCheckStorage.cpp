@@ -1588,6 +1588,14 @@ namespace {
         for (auto *CaseVar : CS->getCaseBodyVariablesOrEmptyArray())
           CaseVar->setDeclContext(NewDC);
       }
+      // A few statements store DeclContexts, update them.
+      if (auto *BS = dyn_cast<BreakStmt>(S))
+        BS->setDeclContext(NewDC);
+      if (auto *CS = dyn_cast<ContinueStmt>(S))
+        CS->setDeclContext(NewDC);
+      if (auto *FS = dyn_cast<FallthroughStmt>(S))
+        FS->setDeclContext(NewDC);
+
       return Action::Continue(S);
     }
 
@@ -2808,30 +2816,35 @@ static VarDecl *synthesizeLocalWrappedValueVar(VarDecl *var) {
   }
   Identifier name = ctx.getIdentifier(nameBuf);
 
+  std::optional<StorageImplInfo> mutability;
+  if (var->hasImplicitPropertyWrapper()) {
+    // FIXME: This can have a setter, but we need a resolved wrapper type
+    // to figure it out.
+    mutability.emplace(StorageImplInfo::getImmutableComputed());
+  } else {
+    auto possibleMutability = var->getPropertyWrapperMutability();
+    if (!possibleMutability)
+      return nullptr;
+
+    if (possibleMutability->Getter == PropertyWrapperMutability::Mutating) {
+      ctx.Diags.diagnose(var->getLoc(), diag::property_wrapper_param_mutating);
+      return nullptr;
+    }
+
+    if (possibleMutability->Setter == PropertyWrapperMutability::Nonmutating) {
+      mutability.emplace(StorageImplInfo::getMutableComputed());
+    } else {
+      mutability.emplace(StorageImplInfo::getImmutableComputed());
+    }
+  }
+
   VarDecl *localVar = new (ctx) VarDecl(/*IsStatic=*/false,
                                         VarDecl::Introducer::Var,
                                         var->getLoc(), name, dc);
   localVar->setImplicit();
   localVar->getAttrs() = var->getAttrs();
   localVar->overwriteAccess(var->getFormalAccess());
-
-  if (var->hasImplicitPropertyWrapper()) {
-    // FIXME: This can have a setter, but we need a resolved wrapper type
-    // to figure it out.
-    localVar->setImplInfo(StorageImplInfo::getImmutableComputed());
-  } else {
-    auto mutability = *var->getPropertyWrapperMutability();
-    if (mutability.Getter == PropertyWrapperMutability::Mutating) {
-      ctx.Diags.diagnose(var->getLoc(), diag::property_wrapper_param_mutating);
-      return nullptr;
-    }
-
-    if (mutability.Setter == PropertyWrapperMutability::Nonmutating) {
-      localVar->setImplInfo(StorageImplInfo::getMutableComputed());
-    } else {
-      localVar->setImplInfo(StorageImplInfo::getImmutableComputed());
-    }
-  }
+  localVar->setImplInfo(*mutability);
 
   return localVar;
 }
