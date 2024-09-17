@@ -49,15 +49,14 @@ public func unqualifiedLookup(
     )
   }
   
-  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInBraceStatement: propagateToParent, includeMembers: false))
+  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInSequentialScope: propagateToParent, includeMembers: false))
     .flatMap { result in
       if case .lookInMembers(let lookInMembers) = result {
         return [ConsumedLookupResult(rawName: "", position: lookInMembers.lookupMembersPosition, flag: 0b010)]
       } else {
-        if let scope = result.scope,
-           let parent = scope.parent,
-           scope.is(GenericParameterClauseSyntax.self),
-           (parent.is(FunctionDeclSyntax.self) || scope.range.contains(lookupPosition)) { // If a result from function generic parameter clause or lookup started within it, reverse introduced names. Simple heuristic to deal with weird ASTScope behavior.
+        if let parent = result.scope.parent,
+           result.scope.is(GenericParameterClauseSyntax.self),
+           (parent.is(FunctionDeclSyntax.self) || result.scope.range.contains(lookupPosition)) { // If a result from function generic parameter clause or lookup started within it, reverse introduced names. Simple heuristic to deal with weird ASTScope behavior.
           return result.names.reversed().map { name in
             ConsumedLookupResult(rawName: name.identifier!.name, position: name.position, flag: 0b100)
           }
