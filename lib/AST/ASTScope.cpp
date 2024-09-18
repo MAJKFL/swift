@@ -107,15 +107,17 @@ public:
   /// Note that the set of VarDecls visited here are going to be a
   /// superset of those visited in consume().
   bool consumePossiblyNotInScope(ArrayRef<VarDecl *> values) override {
+    bool result = originalConsumer->consumePossiblyNotInScope(values);
+    
+//    llvm::outs() << result;
+    
 //    for (auto value : values) {
 //      llvm::outs() << "Possibly not in scope: ";
 //      value->print(llvm::outs());
-//      llvm::outs() << " at: ";
-//      value->getLoc().printLineAndColumn(llvm::outs(), sourceFile->getASTContext().SourceMgr);
 //      llvm::outs() << "\n";
 //    }
     
-    return originalConsumer->consumePossiblyNotInScope(values);
+    return result;
   }
 
   /// Called right before looking at the parent scope of a BraceStmt.

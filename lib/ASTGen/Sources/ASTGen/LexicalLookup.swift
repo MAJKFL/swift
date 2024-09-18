@@ -45,24 +45,26 @@ public func unqualifiedLookup(
     return ConsumedLookupResult(
       rawName: identifierPointer == nil ? "" : String(cString: identifierPointer!),
       position: astResultPosition,
-      flag: bridgedResult.flag
+      flag: ConsumedLookupResultFlag(rawValue: bridgedResult.flag)
     )
   }
   
   let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInSequentialScope: propagateToParent, includeMembers: false))
     .flatMap { result in
       if case .lookInMembers(let lookInMembers) = result {
-        return [ConsumedLookupResult(rawName: "", position: lookInMembers.lookupMembersPosition, flag: 0b010)]
+        return [ConsumedLookupResult(rawName: "", position: lookInMembers.lookupMembersPosition, flag: .shouldLookInMembers)]
       } else {
         if let parent = result.scope.parent,
            result.scope.is(GenericParameterClauseSyntax.self),
-           (parent.is(FunctionDeclSyntax.self) || result.scope.range.contains(lookupPosition)) { // If a result from function generic parameter clause or lookup started within it, reverse introduced names. Simple heuristic to deal with weird ASTScope behavior.
+           (parent.is(FunctionDeclSyntax.self) ||
+            parent.is(SubscriptDeclSyntax.self) ||
+            result.scope.range.contains(lookupPosition)) { // If a result from function generic parameter clause or lookup started within it, reverse introduced names. Simple heuristic to deal with weird ASTScope behavior.
           return result.names.reversed().map { name in
-            ConsumedLookupResult(rawName: name.identifier!.name, position: name.position, flag: 0b100)
+            ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flag: .placementRearranged)
           }
         } else {
           return result.names.map { name in
-            ConsumedLookupResult(rawName: name.identifier!.name, position: name.position, flag: 0)
+            ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flag: [])
           }
         }
       }
@@ -76,18 +78,6 @@ public func unqualifiedLookup(
   var encounteredASTNames = Set<ConsumedLookupResult>()
   var passed = true
   var wasLookupStopped = false
-  
-  if let firstASTResult = ASTScopeResults.first {
-    // Check if the first name from declaration was introduced before it's end. COULD POSSIBLY OMIT BUGS!!!
-    if isInvalidFirstNameInDeclarationIntroduction(
-      sourceFile: sourceFileSyntax,
-      lookupPosition: lookupPosition,
-      firstNamePosition: firstASTResult.position
-    ) {
-      consoleOutput += "> ℹ️ | Omitted ASTScope name: \(firstASTResult.name) \(sourceLocationConverter.location(for: firstASTResult.position).lineWithColumn)\n"
-      astResultOffset = 1
-    }
-  }
   
   while i < max(ASTScopeResults.count, SLLookupResults.count) {
     var prefix = ""
@@ -103,10 +93,21 @@ public func unqualifiedLookup(
         let (isFirstEncounter, _) = encounteredASTNames.insert(astResult!)
         
         guard isFirstEncounter else {
-          consoleOutput += "> ℹ️ | Omitted ASTScope name: \(astResult!.name) \(sourceLocationConverter.location(for: astResult!.position).lineWithColumn)\n"
+          consoleOutput += "> ℹ️ | Omitted ASTScope name: \(astResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
           astResultOffset += 1
           continue
         }
+      }
+      
+      // Check if the first name from declaration was introduced before it's end. COULD POSSIBLY OMIT BUGS!!!
+      if isInvalidFirstNameInDeclarationIntroduction(
+        sourceFile: sourceFileSyntax,
+        lookupPosition: lookupPosition,
+        firstNamePosition: astResult!.position
+      ) {
+        consoleOutput += "> ℹ️ | Omitted ASTScope name: \(astResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
+        astResultOffset += 1
+        continue
       }
       
       astResultStr += astResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
@@ -160,7 +161,6 @@ public func unqualifiedLookup(
     
     if let astResult, astResult.isTheEndOfLookup {
       wasLookupStopped = true
-      consoleOutput += "-> Lookup stop flag"
     }
     
     consoleOutput += "\n"
@@ -179,6 +179,7 @@ private func isInvalidFirstNameInDeclarationIntroduction(sourceFile: SourceFileS
   let originToken = sourceFile.token(at: lookupPosition)
   let firstNameToken = sourceFile.token(at: firstNamePosition)
   
+  // Check if the two positions are in closure expression.
   let originClosestClosureExprAncestor = originToken?.ancestorOrSelf { syntax in
     syntax.as(ClosureExprSyntax.self)
   }
@@ -192,46 +193,72 @@ private func isInvalidFirstNameInDeclarationIntroduction(sourceFile: SourceFileS
     return false
   }
   
-  let originClosestVariableDeclAncestor = originToken?.ancestorOrSelf { syntax in
-    syntax.as(VariableDeclSyntax.self)
+  // Check if the two positions are in accessor declaration.
+  let originClosestAccessorDeclAncestor = originToken?.ancestorOrSelf { syntax in
+    syntax.as(AccessorDeclSyntax.self)
   }
-  let firstNameClosestVariableDeclAncestor = firstNameToken?.ancestorOrSelf { syntax in
-    syntax.as(VariableDeclSyntax.self)
+  let firstNameClosestAccessorDeclAncestor = firstNameToken?.ancestorOrSelf { syntax in
+    syntax.as(AccessorDeclSyntax.self)
   }
   
-  guard let originClosestVariableDeclAncestor,
-        let firstNameClosestVariableDeclAncestor
-  else { return false }
+  if let originClosestAccessorDeclAncestor,
+     let firstNameClosestAccessorDeclAncestor,
+     originClosestAccessorDeclAncestor == firstNameClosestAccessorDeclAncestor {
+    return false
+  }
   
-  return originClosestVariableDeclAncestor == firstNameClosestVariableDeclAncestor
+  // Check if the two positions are in separate pattern bindings.
+  let originClosestPatternBindingAncestor = originToken?.ancestorOrSelf { syntax in
+    syntax.as(PatternBindingSyntax.self)
+  }
+  let firstNameClosestPatternBindingAncestor = firstNameToken?.ancestorOrSelf { syntax in
+    syntax.as(PatternBindingSyntax.self)
+  }
+  
+  guard let originClosestPatternBindingAncestor,
+        let firstNameClosestPatternBindingAncestor
+  else {
+    return false
+  }
+  
+  return originClosestPatternBindingAncestor == firstNameClosestPatternBindingAncestor
 }
 
 fileprivate struct ConsumedLookupResult: Hashable {
   var rawName: String
   var position: AbsolutePosition
-  var flag: Int
+  var flag: ConsumedLookupResultFlag
   
   var name: String {
     shouldLookInMembers ? "" : rawName
   }
   
   var isTheEndOfLookup: Bool {
-    flag & 0b001 != 0
+    flag.contains(.endOfLookup)
   }
   
   var shouldLookInMembers: Bool {
-    flag & 0b010 != 0
+    flag.contains(.shouldLookInMembers)
   }
   
   var resultPlacementRearranged: Bool {
-    flag & 0b100 != 0
+    flag.contains(.placementRearranged)
   }
   
   func consoleLogStr(sourceLocationConverter: SourceLocationConverter) -> String {
+    (isTheEndOfLookup ? "End here: " : "") +
     (resultPlacementRearranged ? "↕️ " : "") +
     (shouldLookInMembers ? "Look memb: " : "\(name) ") +
     sourceLocationConverter.location(for: position).lineWithColumn
   }
+}
+
+struct ConsumedLookupResultFlag: OptionSet, Hashable {
+  let rawValue: Int
+
+  static let endOfLookup = ConsumedLookupResultFlag(rawValue: 1 << 0)
+  static let shouldLookInMembers = ConsumedLookupResultFlag(rawValue: 1 << 1)
+  static let placementRearranged = ConsumedLookupResultFlag(rawValue: 1 << 2)
 }
 
 extension SourceLocation {
