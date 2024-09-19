@@ -66,12 +66,22 @@ public:
     bool result = originalConsumer->consume(values, baseDC);
     
     for (auto value : values) {
-      recordedElements.push_back(BridgedConsumedLookupResult(
-                                                             value->getBaseIdentifier(),
-                                                             value->getLoc(),
-                                                             result
-                                                             )
-                                 );
+      if (auto sourceLoc = value->getLoc()) {
+        recordedElements.push_back(BridgedConsumedLookupResult(
+                                                               value->getBaseIdentifier(),
+                                                               sourceLoc,
+                                                               result
+                                                               )
+                                   );
+      } else {
+        // If sourceLoc is unavailable, use location of it's parent.
+        recordedElements.push_back(BridgedConsumedLookupResult(
+                                                               value->getBaseIdentifier(),
+                                                               value->getDeclContext()->getAsDecl()->getLoc(),
+                                                               result
+                                                               )
+                                   );
+      }
     }
     
     return result;

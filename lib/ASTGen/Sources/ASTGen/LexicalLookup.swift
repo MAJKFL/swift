@@ -104,7 +104,7 @@ public func unqualifiedLookup(
         sourceFile: sourceFileSyntax,
         lookupPosition: lookupPosition,
         firstNamePosition: astResult!.position
-      ) {
+      ) && astResult!.name != "self" {
         consoleOutput += "> ℹ️ | Omitted ASTScope name: \(astResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
         astResultOffset += 1
         continue
@@ -179,49 +179,41 @@ private func isInvalidFirstNameInDeclarationIntroduction(sourceFile: SourceFileS
   let originToken = sourceFile.token(at: lookupPosition)
   let firstNameToken = sourceFile.token(at: firstNamePosition)
   
-  // Check if the two positions are in closure expression.
-  let originClosestClosureExprAncestor = originToken?.ancestorOrSelf { syntax in
-    syntax.as(ClosureExprSyntax.self)
-  }
-  let firstNameClosestClosureExprAncestor = firstNameToken?.ancestorOrSelf { syntax in
-    syntax.as(ClosureExprSyntax.self)
+  let commonAncestors: [SyntaxProtocol.Type] = [
+    SwitchCaseSyntax.self,
+    ClosureExprSyntax.self,
+    AccessorDeclSyntax.self,
+    PatternBindingSyntax.self
+  ]
+  
+  let originAncestor = firstAncestorOfKind(
+    of: originToken,
+    kinds: commonAncestors
+  )
+  
+  let firstNameAncestor = firstAncestorOfKind(
+    of: firstNameToken,
+    kinds: commonAncestors
+  )
+  
+  guard let originAncestor,
+        let firstNameAncestor,
+        originAncestor.kind == firstNameAncestor.kind
+  else { return false }
+  
+  return originAncestor.kind == .patternBinding && originAncestor.id == firstNameAncestor.id
+}
+
+fileprivate func firstAncestorOfKind(of syntax: SyntaxProtocol?, kinds: [SyntaxProtocol.Type]) -> SyntaxProtocol? {
+  guard let syntax else { return nil }
+  
+  for kind in kinds {
+    if syntax.is(kind) {
+      return syntax
+    }
   }
   
-  if let originClosestClosureExprAncestor,
-     let firstNameClosestClosureExprAncestor,
-     originClosestClosureExprAncestor == firstNameClosestClosureExprAncestor {
-    return false
-  }
-  
-  // Check if the two positions are in accessor declaration.
-  let originClosestAccessorDeclAncestor = originToken?.ancestorOrSelf { syntax in
-    syntax.as(AccessorDeclSyntax.self)
-  }
-  let firstNameClosestAccessorDeclAncestor = firstNameToken?.ancestorOrSelf { syntax in
-    syntax.as(AccessorDeclSyntax.self)
-  }
-  
-  if let originClosestAccessorDeclAncestor,
-     let firstNameClosestAccessorDeclAncestor,
-     originClosestAccessorDeclAncestor == firstNameClosestAccessorDeclAncestor {
-    return false
-  }
-  
-  // Check if the two positions are in separate pattern bindings.
-  let originClosestPatternBindingAncestor = originToken?.ancestorOrSelf { syntax in
-    syntax.as(PatternBindingSyntax.self)
-  }
-  let firstNameClosestPatternBindingAncestor = firstNameToken?.ancestorOrSelf { syntax in
-    syntax.as(PatternBindingSyntax.self)
-  }
-  
-  guard let originClosestPatternBindingAncestor,
-        let firstNameClosestPatternBindingAncestor
-  else {
-    return false
-  }
-  
-  return originClosestPatternBindingAncestor == firstNameClosestPatternBindingAncestor
+  return firstAncestorOfKind(of: syntax.parent, kinds: kinds)
 }
 
 fileprivate struct ConsumedLookupResult: Hashable {
