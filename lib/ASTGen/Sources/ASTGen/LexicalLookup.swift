@@ -19,7 +19,7 @@ import SwiftSyntax
 public func unqualifiedLookup(
   sourceFilePtr: UnsafeRawPointer,
   lookupAt: BridgedSourceLoc,
-  propagateToParent: Bool,
+  finishInSequentialScope: Bool,
   astScopeResultRef: BridgedArrayRef
 ) -> Bool {
   let sourceFile = sourceFilePtr.assumingMemoryBound(to: ExportedSourceFile.self)
@@ -49,7 +49,7 @@ public func unqualifiedLookup(
     )
   }
   
-  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInSequentialScope: propagateToParent, includeMembers: false))
+  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInSequentialScope: finishInSequentialScope, includeMembers: false))
     .flatMap { result in
       if case .lookInMembers(let lookInMembers) = result {
         return [ConsumedLookupResult(rawName: "", position: lookInMembers.lookupMembersPosition, flag: .shouldLookInMembers)]
@@ -64,17 +64,24 @@ public func unqualifiedLookup(
           }
         } else {
           return result.names.map { name in
-            ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flag: [])
+            let shouldBeSkipped = name.identifier?.name == "Self" ? !result.scope.is(ProtocolDeclSyntax.self) : false
+            
+            return ConsumedLookupResult(
+              rawName: name.identifier?.name ?? "",
+              position: name.position,
+              flag: shouldBeSkipped ? [.shouldBeSkipped] : []
+            )
           }
         }
       }
     }
   
-  var consoleOutput = "-----> Lookup started at: \(sourceLocationConverter.location(for: lookupPosition).lineWithColumn) (\"\(performLookupAt.text)\")\n"
+  var consoleOutput = "-----> Lookup started at: \(sourceLocationConverter.location(for: lookupPosition).lineWithColumn) (\"\(performLookupAt.text)\") finishInSequentialScope: \(finishInSequentialScope)\n"
   consoleOutput += "     |" + "ASTScope".addPaddingUpTo(characters: 20) + "|" + "SwiftLexicalLookup".addPaddingUpTo(characters: 20) + "\n"
   
   var i = 0
   var astResultOffset = 0
+  var newResultOffset = 0
   var encounteredASTNames = Set<ConsumedLookupResult>()
   var passed = true
   var wasLookupStopped = false
@@ -90,7 +97,7 @@ public func unqualifiedLookup(
       astResult = ASTScopeResults[astResultOffset + i]
       
       if !astResult!.shouldLookInMembers {
-        let (isFirstEncounter, _) = encounteredASTNames.insert(astResult!)
+        let isFirstEncounter = !encounteredASTNames.contains(astResult!)
         
         guard isFirstEncounter else {
           consoleOutput += "> ℹ️ | Omitted ASTScope name: \(astResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
@@ -109,9 +116,7 @@ public func unqualifiedLookup(
         astResultOffset += 1
         continue
       }
-      
-      astResultStr += astResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
-    } else if i >= ASTScopeResults.count {
+    } else if i - newResultOffset >= ASTScopeResults.count {
       if !wasLookupStopped {
         prefix = "❌"
         passed = false
@@ -121,10 +126,14 @@ public func unqualifiedLookup(
     
     var sllResult: ConsumedLookupResult?
     
-    if i < SLLookupResults.count {
-      sllResult = SLLookupResults[i]
+    if i + newResultOffset < SLLookupResults.count {
+      sllResult = SLLookupResults[i + newResultOffset]
       
-      sllResultStr = sllResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
+      if sllResult!.shouldBeSkipped {
+        consoleOutput += "> ℹ️ | Omitted SwiftLexicalLookup name: \(sllResult!.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
+        newResultOffset += 1
+        continue
+      }
     } else if i - astResultOffset >= SLLookupResults.count {
       if !wasLookupStopped {
         prefix = "❌"
@@ -132,6 +141,16 @@ public func unqualifiedLookup(
       }
       
       sllResultStr = "-----"
+    }
+    
+    if let astResult {
+      encounteredASTNames.insert(astResult)
+      
+      astResultStr += astResult.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
+    }
+    
+    if let sllResult {
+      sllResultStr = sllResult.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
     }
     
     i += 1
@@ -168,6 +187,8 @@ public func unqualifiedLookup(
   
   if !passed {
     print(consoleOutput)
+//    print(sourceFileSyntax.description)
+//    print("----------------")
   }
   
   return passed
@@ -237,6 +258,10 @@ fileprivate struct ConsumedLookupResult: Hashable {
     flag.contains(.placementRearranged)
   }
   
+  var shouldBeSkipped: Bool {
+    flag.contains(.shouldBeSkipped)
+  }
+  
   func consoleLogStr(sourceLocationConverter: SourceLocationConverter) -> String {
     (isTheEndOfLookup ? "End here: " : "") +
     (resultPlacementRearranged ? "↕️ " : "") +
@@ -251,6 +276,7 @@ struct ConsumedLookupResultFlag: OptionSet, Hashable {
   static let endOfLookup = ConsumedLookupResultFlag(rawValue: 1 << 0)
   static let shouldLookInMembers = ConsumedLookupResultFlag(rawValue: 1 << 1)
   static let placementRearranged = ConsumedLookupResultFlag(rawValue: 1 << 2)
+  static let shouldBeSkipped = ConsumedLookupResultFlag(rawValue: 1 << 3)
 }
 
 extension SourceLocation {
