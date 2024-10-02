@@ -38,9 +38,13 @@ public func unqualifiedLookup(
 
   let astScopeResultArray = Array(UnsafeBufferPointer(start: pointer, count: count))
   
-  let ASTScopeResults = astScopeResultArray.map { bridgedResult in
+  let ASTScopeResults: [ConsumedLookupResult] = astScopeResultArray.compactMap { bridgedResult in
     let identifierPointer = bridgedResult.name.raw?.assumingMemoryBound(to: CChar.self)
-    let astResultPosition = sourceFile.pointee.position(of: bridgedResult.nameLoc)!
+    
+    guard let astResultPosition = sourceFile.pointee.position(of: bridgedResult.nameLoc) else {
+      print("One of the results, doesn't have a position")
+      return nil
+    }
     
     return ConsumedLookupResult(
       rawName: identifierPointer == nil ? "" : String(cString: identifierPointer!),
@@ -49,17 +53,24 @@ public func unqualifiedLookup(
     )
   }
   
-  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInSequentialScope: finishInSequentialScope, includeMembers: false))
+  let SLLookupResults = performLookupAt.lookup(nil, with: LookupConfig(finishInSequentialScope: finishInSequentialScope))
     .flatMap { result in
       if case .lookInMembers(let lookInMembers) = result {
         return [ConsumedLookupResult(rawName: "", position: lookInMembers.lookupMembersPosition, flag: .shouldLookInMembers)]
       } else {
-        if let parent = result.scope.parent,
-           result.scope.is(GenericParameterClauseSyntax.self),
-           (parent.is(FunctionDeclSyntax.self) ||
+        if let parent = result.scope.parent, result.scope.is(GenericParameterClauseSyntax.self) {
+          if (parent.is(FunctionDeclSyntax.self) ||
             parent.is(SubscriptDeclSyntax.self) ||
-            result.scope.range.contains(lookupPosition)) { // If a result from function generic parameter clause or lookup started within it, reverse introduced names. Simple heuristic to deal with weird ASTScope behavior.
-          return result.names.reversed().map { name in
+              result.scope.range.contains(lookupPosition)) { // If a result from function generic parameter clause or lookup started within it, reverse introduced names. Simple heuristic to deal with weird ASTScope behavior.
+            return result.names.reversed().map { name in
+              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flag: .placementRearranged)
+            }
+          } else if let nominalTypeScope = Syntax(parent).asProtocol(SyntaxProtocol.self) as? NominalTypeDeclSyntax, nominalTypeScope.inheritanceClause?.range.contains(lookupPosition) ?? false {
+            return result.names.reversed().map { name in
+              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flag: .placementRearranged)
+            }
+          }
+          return result.names.map { name in
             ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flag: .placementRearranged)
           }
         } else {
