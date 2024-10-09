@@ -49,3 +49,25 @@ struct RecurGeneric<T: P3>: P3 {
 struct Specialize: P3 {
     typealias A = RecurGeneric<Specialize>
 }
+
+protocol P48a { associatedtype A = Int }
+protocol P48b { associatedtype B }
+protocol P48c: P48a, P48b where A == B {}
+
+public extension Array where Element == Int {
+  mutating func foo(
+    at index: Int,
+    byCalling closure: (inout Element) -> Void
+  ) where Element: Differentiable { // expected-error{{cannot find type 'Differentiable' in scope}}
+    closure(&self[index])
+  }
+}
+
+public extension Array {
+  mutating func bar(
+    at index: Int,
+    byCalling closure:(inout Element) -> Void
+  ) where Element: Differentiable { // expected-error{{cannot find type 'Differentiable' in scope}}
+    closure(&self[index])
+  }
+}

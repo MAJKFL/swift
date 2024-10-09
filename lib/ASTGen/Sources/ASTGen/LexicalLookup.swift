@@ -63,11 +63,10 @@ public func unqualifiedLookup(
   )
   
   // Output
-//  if !passed {
-//    print(consoleOutput)
-//  }
+  if !passed {
+    print(consoleOutput)
+  }
   
-  print(consoleOutput)
   return passed
 }
 
@@ -202,7 +201,7 @@ private func sllConsumedResults(
             return ConsumedLookupResult(
               rawName: name.identifier?.name ?? "",
               position: name.position,
-              flags: shouldBeOmitted ? [.shouldBeOmitted] : []
+              flags: shouldBeOmitted ? [.shouldBeOptionallyOmitted] : []
             )
           }
         }
@@ -279,6 +278,15 @@ private func flaggingPass(
       // Check if lookup was stopped earlier. If so, flag this result with lookupStopped.
       if wasLookupStopped {
         sllResult.flags.insert(.lookupStopped)
+      }
+      
+      if sllResult.shouldBeOptionallyOmitted {
+        if let astResult,
+           astResult.name == sllResult.name {
+          sllResult.flags.remove(.shouldBeOptionallyOmitted)
+        } else {
+          sllResult.flags.insert(.shouldBeOmitted)
+        }
       }
       
       // Check if next results at this position should be ignored. If so, set ignoreAt and omit this name.
@@ -426,6 +434,10 @@ private class ConsumedLookupResult: Hashable {
     flags.contains(.shouldBeOmitted)
   }
   
+  var shouldBeOptionallyOmitted: Bool {
+    flags.contains(.shouldBeOptionallyOmitted)
+  }
+  
   var ignoreNextFromHere: Bool {
     flags.contains(.ignoreNextFromHere)
   }
@@ -463,8 +475,9 @@ struct ConsumedLookupResultFlag: OptionSet, Hashable {
   static let shouldLookInMembers = ConsumedLookupResultFlag(rawValue: 1 << 1)
   static let placementRearranged = ConsumedLookupResultFlag(rawValue: 1 << 2)
   static let shouldBeOmitted = ConsumedLookupResultFlag(rawValue: 1 << 3)
-  static let lookupStopped = ConsumedLookupResultFlag(rawValue: 1 << 4)
-  static let ignoreNextFromHere = ConsumedLookupResultFlag(rawValue: 1 << 5)
+  static let shouldBeOptionallyOmitted = ConsumedLookupResultFlag(rawValue: 1 << 4)
+  static let lookupStopped = ConsumedLookupResultFlag(rawValue: 1 << 5)
+  static let ignoreNextFromHere = ConsumedLookupResultFlag(rawValue: 1 << 6)
 }
 
 extension SourceLocation {

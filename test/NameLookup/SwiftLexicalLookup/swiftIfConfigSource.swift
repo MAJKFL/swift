@@ -1,5 +1,5 @@
 // RUN: %target-typecheck-verify-swift -enable-experimental-feature UnqualifiedLookupValidation
-import SwiftSyntax // expected-error {{unexpected error produced: no such module 'SwiftSyntax'}}
+import SwiftSyntax // expected-error {{no such module 'SwiftSyntax'}}
 
 enum ActiveClauseEvaluator {
   case configuredRegions(ConfiguredRegions)
