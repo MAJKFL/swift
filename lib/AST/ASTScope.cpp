@@ -161,7 +161,7 @@ void ASTScope::unqualifiedLookup(
   if (auto *s = SF->getASTContext().Stats)
     ++s->getFrontendCounters().NumASTScopeLookups;
   
-  if (SF->getASTContext().LangOpts.hasFeature(Feature::UnqualifiedLookupValidation) || true) {
+  if (SF->getASTContext().LangOpts.hasFeature(Feature::UnqualifiedLookupValidation)) {
     LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = LoggingASTScopeDeclConsumer(&consumer);
     
     ASTScopeImpl::unqualifiedLookup(SF, loc, loggingASTScopeDeclConsumer);
