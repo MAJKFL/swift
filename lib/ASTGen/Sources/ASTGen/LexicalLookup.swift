@@ -20,6 +20,7 @@ private let rowCharWidth: Int = 30
 @_cdecl("swift_ASTGen_validateUnqualifiedLookup")
 public func unqualifiedLookup(
   sourceFilePtr: UnsafeRawPointer,
+  astContext: BridgedASTContext,
   lookupAt: BridgedSourceLoc,
   finishInSequentialScope: Bool,
   astScopeResultRef: BridgedArrayRef
@@ -29,6 +30,11 @@ public func unqualifiedLookup(
   let sourceFileSyntax = sourceFile.pointee.syntax
   let sourceLocationConverter = sourceFile.pointee.sourceLocationConverter
   
+  let buildConfiguration = CompilerBuildConfiguration(
+    ctx: astContext,
+    sourceBuffer: sourceFile.pointee.buffer
+  )
+  
   guard let lookupPosition = sourceFile.pointee.position(of: lookupAt),
         let lookupToken = sourceFileSyntax.token(at: lookupPosition)
   else {
@@ -37,10 +43,17 @@ public func unqualifiedLookup(
   }
   
   // Map AST result
-  let astResults = astConsumedResults(sourceFile: sourceFile, astScopeResultRef: astScopeResultRef)
+  let astResults = astConsumedResults(
+    sourceFile: sourceFile,
+    astScopeResultRef: astScopeResultRef
+  )
   
   // Map SLL result
-  let sllResults = sllConsumedResults(lookupToken: lookupToken, finishInSequentialScope: finishInSequentialScope)
+  let sllResults = sllConsumedResults(
+    lookupToken: lookupToken,
+    finishInSequentialScope: finishInSequentialScope,
+    buildConfiguration: buildConfiguration
+  )
   
   // Add header to the output
   var consoleOutput = "-----> Lookup started at: \(sourceLocationConverter.location(for: lookupPosition).lineWithColumn) (\"\(lookupToken.text)\") finishInSequentialScope: \(finishInSequentialScope)\n"
@@ -99,6 +112,8 @@ private func isInvalidFirstNameInDeclarationIntroduction(
     SwitchCaseSyntax.self,
     ClosureExprSyntax.self,
     AccessorDeclSyntax.self,
+    AccessorBlockSyntax.self,
+    ForStmtSyntax.self,
     PatternBindingSyntax.self
   ]
   
@@ -151,9 +166,10 @@ private func astConsumedResults(
 /// the results an array of `ConsumedLookupResult`. Introduces appropriate flags.
 private func sllConsumedResults(
   lookupToken: TokenSyntax,
-  finishInSequentialScope: Bool
+  finishInSequentialScope: Bool,
+  buildConfiguration: CompilerBuildConfiguration
 ) -> [ConsumedLookupResult] {
-  lookupToken.lookup(nil, with: LookupConfig(finishInSequentialScope: finishInSequentialScope))
+  lookupToken.lookup(nil, with: LookupConfig(finishInSequentialScope: finishInSequentialScope, buildConfiguration: buildConfiguration))
     .flatMap { result in
       switch result {
       case .lookInMembers(let lookInMembers):
@@ -176,15 +192,30 @@ private func sllConsumedResults(
         )]
       default:
         if let parent = result.scope.parent, result.scope.is(GenericParameterClauseSyntax.self) {
-          if (parent.is(FunctionDeclSyntax.self) ||
-            parent.is(SubscriptDeclSyntax.self) ||
-              result.scope.range.contains(lookupToken.position)) {
+          if let parentFunctionDecl = parent.as(FunctionDeclSyntax.self),
+             parentFunctionDecl.attributes.range.contains(lookupToken.position) {
+            // If lookup started fron function attributes, don't reverse
+            return result.names.map { name in
+              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: [])
+            }
+          } else if parent.is(FunctionDeclSyntax.self) ||
+                    parent.is(SubscriptDeclSyntax.self) ||
+                    result.scope.range.contains(lookupToken.position) {
             // If a result from function generic parameter clause or lookup started within it, reverse introduced names.
             return result.names.reversed().map { name in
               ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: .placementRearranged)
             }
           } else if let nominalTypeScope = Syntax(parent).asProtocol(SyntaxProtocol.self) as? NominalTypeDeclSyntax, nominalTypeScope.inheritanceClause?.range.contains(lookupToken.position) ?? false {
             // If lookup started from nominal type inheritance clause, reverse introduced names.
+            return result.names.reversed().map { name in
+              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: .placementRearranged)
+            }
+          } else if let initializerDecl = parent.as(InitializerDeclSyntax.self),
+                    initializerDecl.range.contains(lookupToken.position) {
+            return result.names.reversed().map { name in
+              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: .placementRearranged)
+            }
+          } else if parent.is(TypeAliasDeclSyntax.self) {
             return result.names.reversed().map { name in
               ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: .placementRearranged)
             }

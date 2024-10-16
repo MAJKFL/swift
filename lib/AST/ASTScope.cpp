@@ -167,6 +167,7 @@ void ASTScope::unqualifiedLookup(
     ASTScopeImpl::unqualifiedLookup(SF, loc, loggingASTScopeDeclConsumer);
     
     bool passed = swift_ASTGen_validateUnqualifiedLookup(SF->getExportedSourceFile(),
+                                           SF->getASTContext(),
                                            loc,
                                            loggingASTScopeDeclConsumer.finishLookupInBraceStmt(nullptr),
                                            BridgedArrayRef(loggingASTScopeDeclConsumer.recordedElements.data(), loggingASTScopeDeclConsumer.recordedElements.size())
