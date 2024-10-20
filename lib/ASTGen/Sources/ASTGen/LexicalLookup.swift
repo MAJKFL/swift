@@ -12,11 +12,29 @@
 
 import ASTBridging
 import BasicBridging
-import SwiftSyntax
 @_spi(Experimental) import SwiftLexicalLookup
+import SwiftSyntax
 
 private let rowCharWidth: Int = 30
 
+/// This function validates output of SwiftLexicalLookup
+/// against the output of `ASTScope` passed to `astScopeResultRef`.
+///
+/// The function assigns specific flags to obtained names. The flags are applied in three phases:
+/// - `ASTScope` name extraction - The names obtained from `astScopeResultRef` are
+///   mapped to `ConsumedLookupResult` common representation. The names receive flags
+///   independently from `SwiftLexicalLookup` results.
+/// - `SwiftLexicalLookup` lookup - The names obtained from performing lookup with `SwiftLexicalLookup` are
+///   mapped to `ConsumedLookupResult` common representation. The names receive flags
+///   independently from `ASTScope` results.
+/// - Flagging pass - The method iterates through both result arrays together and, taking into
+///   account already applied flags and relationships between results, applies more flags to the results.
+///
+/// Fully flagged results, are then fed to the name matching pass. Using associated names, positions and
+/// flags, it asserts the equality of results and produces console output.
+///
+/// Returns `true`, if the matching was successful and `false` otherwise.
+/// Additionally, when matching fails, the function prints console output with the two results compared.
 @_cdecl("swift_ASTGen_validateUnqualifiedLookup")
 public func unqualifiedLookup(
   sourceFilePtr: UnsafeRawPointer,
@@ -29,36 +47,38 @@ public func unqualifiedLookup(
   let sourceFile = sourceFilePtr.assumingMemoryBound(to: ExportedSourceFile.self)
   let sourceFileSyntax = sourceFile.pointee.syntax
   let sourceLocationConverter = sourceFile.pointee.sourceLocationConverter
-  
   let buildConfiguration = CompilerBuildConfiguration(
     ctx: astContext,
     sourceBuffer: sourceFile.pointee.buffer
   )
-  
+
   guard let lookupPosition = sourceFile.pointee.position(of: lookupAt),
-        let lookupToken = sourceFileSyntax.token(at: lookupPosition)
+    let lookupToken = sourceFileSyntax.token(at: lookupPosition)
   else {
     print("Could not determine lookup position")
     return false
   }
-  
+
   // Map AST result
   let astResults = astConsumedResults(
     sourceFile: sourceFile,
     astScopeResultRef: astScopeResultRef
   )
-  
+
   // Map SLL result
   let sllResults = sllConsumedResults(
     lookupToken: lookupToken,
     finishInSequentialScope: finishInSequentialScope,
     buildConfiguration: buildConfiguration
   )
-  
+
   // Add header to the output
-  var consoleOutput = "-----> Lookup started at: \(sourceLocationConverter.location(for: lookupPosition).lineWithColumn) (\"\(lookupToken.text)\") finishInSequentialScope: \(finishInSequentialScope)\n"
-  consoleOutput += "     |" + "ASTScope".addPaddingUpTo(characters: rowCharWidth) + "|" + "SwiftLexicalLookup".addPaddingUpTo(characters: rowCharWidth) + "\n"
-  
+  var consoleOutput =
+    "-----> Lookup started at: \(sourceLocationConverter.location(for: lookupPosition).lineWithColumn) (\"\(lookupToken.text)\") finishInSequentialScope: \(finishInSequentialScope)\n"
+  consoleOutput +=
+    "     |" + "ASTScope".addPaddingUpTo(characters: rowCharWidth) + "|"
+    + "SwiftLexicalLookup".addPaddingUpTo(characters: rowCharWidth) + "\n"
+
   // Flagging pass
   flaggingPass(
     astResults: astResults,
@@ -66,7 +86,7 @@ public func unqualifiedLookup(
     sourceFileSyntax: sourceFileSyntax,
     lookupPosition: lookupPosition
   )
-  
+
   // Matching pass
   let passed = matchingPass(
     astResults: astResults,
@@ -74,12 +94,12 @@ public func unqualifiedLookup(
     sourceLocationConverter: sourceLocationConverter,
     consoleOutput: &consoleOutput
   )
-  
+
   // Output
   if !passed {
     print(consoleOutput)
   }
-  
+
   return passed
 }
 
@@ -95,43 +115,43 @@ private func isInvalidFirstNameInDeclarationIntroduction(
     kinds: [SyntaxProtocol.Type]
   ) -> SyntaxProtocol? {
     guard let syntax else { return nil }
-    
+
     for kind in kinds {
       if syntax.is(kind) {
         return syntax
       }
     }
-    
+
     return firstAncestorOfKind(of: syntax.parent, kinds: kinds)
   }
-  
+
   let originToken = sourceFile.token(at: lookupPosition)
   let firstNameToken = sourceFile.token(at: namePosition)
-  
+
   let commonAncestors: [SyntaxProtocol.Type] = [
     SwitchCaseSyntax.self,
     ClosureExprSyntax.self,
     AccessorDeclSyntax.self,
     AccessorBlockSyntax.self,
     ForStmtSyntax.self,
-    PatternBindingSyntax.self
+    PatternBindingSyntax.self,
   ]
-  
+
   let originAncestor = firstAncestorOfKind(
     of: originToken,
     kinds: commonAncestors
   )
-  
+
   let firstNameAncestor = firstAncestorOfKind(
     of: firstNameToken,
     kinds: commonAncestors
   )
-  
+
   guard let originAncestor,
-        let firstNameAncestor,
-        originAncestor.kind == firstNameAncestor.kind
+    let firstNameAncestor,
+    originAncestor.kind == firstNameAncestor.kind
   else { return false }
-  
+
   return originAncestor.kind == .patternBinding && originAncestor.id == firstNameAncestor.id
 }
 
@@ -145,20 +165,28 @@ private func astConsumedResults(
   let count = astScopeResultRef.count
 
   let astScopeResultArray = Array(UnsafeBufferPointer(start: pointer, count: count))
-  
+
   return astScopeResultArray.compactMap { bridgedResult in
     let identifierPointer = bridgedResult.name.raw?.assumingMemoryBound(to: CChar.self)
-    
+
     guard let astResultPosition = sourceFile.pointee.position(of: bridgedResult.nameLoc) else {
       print("One of the results, doesn't have a position")
       return nil
     }
-    
-    return ConsumedLookupResult(
+
+    let consumedResult = ConsumedLookupResult(
       rawName: identifierPointer == nil ? "" : String(cString: identifierPointer!),
       position: astResultPosition,
       flags: ConsumedLookupResultFlag(rawValue: bridgedResult.flag)
     )
+
+    // If the name doesn't have any flags and
+    // the name is empty, it should be omitted.
+    if consumedResult.flags.isEmpty && consumedResult.name.isEmpty {
+      consumedResult.flags.insert(.shouldBeOmitted)
+    }
+
+    return consumedResult
   }
 }
 
@@ -169,75 +197,109 @@ private func sllConsumedResults(
   finishInSequentialScope: Bool,
   buildConfiguration: CompilerBuildConfiguration
 ) -> [ConsumedLookupResult] {
-  lookupToken.lookup(nil, with: LookupConfig(finishInSequentialScope: finishInSequentialScope, buildConfiguration: buildConfiguration))
-    .flatMap { result in
-      switch result {
-      case .lookInMembers(let lookInMembers):
-        return [ConsumedLookupResult(
+  lookupToken.lookup(
+    nil,
+    with: LookupConfig(finishInSequentialScope: finishInSequentialScope, buildConfiguration: buildConfiguration)
+  )
+  .flatMap { result in
+    switch result {
+    case .lookInMembers(let lookInMembers):
+      return [
+        ConsumedLookupResult(
           rawName: "",
           position: lookInMembers.lookupMembersPosition,
           flags: .shouldLookInMembers
-        )]
-      case .lookInGenericParametersOfExtendedType(let extensionDecl):
-        return [ConsumedLookupResult(
+        )
+      ]
+    case .lookInGenericParametersOfExtendedType(let extensionDecl):
+      return [
+        ConsumedLookupResult(
           rawName: "",
           position: extensionDecl.extensionKeyword.positionAfterSkippingLeadingTrivia,
           flags: .ignoreNextFromHere
-        )]
-      case .mightIntroduceDollarIdentifiers(let closure):
-        return [ConsumedLookupResult(
+        )
+      ]
+    case .mightIntroduceDollarIdentifiers(let closure):
+      return [
+        ConsumedLookupResult(
           rawName: "",
           position: closure.positionAfterSkippingLeadingTrivia,
           flags: .ignoreNextFromHere
-        )]
-      default:
-        if let parent = result.scope.parent, result.scope.is(GenericParameterClauseSyntax.self) {
-          if let parentFunctionDecl = parent.as(FunctionDeclSyntax.self),
-             parentFunctionDecl.attributes.range.contains(lookupToken.position) {
-            // If lookup started fron function attributes, don't reverse
-            return result.names.map { name in
-              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: [])
-            }
-          } else if parent.is(FunctionDeclSyntax.self) ||
-                    parent.is(SubscriptDeclSyntax.self) ||
-                    result.scope.range.contains(lookupToken.position) {
-            // If a result from function generic parameter clause or lookup started within it, reverse introduced names.
-            return result.names.reversed().map { name in
-              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: .placementRearranged)
-            }
-          } else if let nominalTypeScope = Syntax(parent).asProtocol(SyntaxProtocol.self) as? NominalTypeDeclSyntax, nominalTypeScope.inheritanceClause?.range.contains(lookupToken.position) ?? false {
-            // If lookup started from nominal type inheritance clause, reverse introduced names.
-            return result.names.reversed().map { name in
-              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: .placementRearranged)
-            }
-          } else if let initializerDecl = parent.as(InitializerDeclSyntax.self),
-                    initializerDecl.range.contains(lookupToken.position) {
-            return result.names.reversed().map { name in
-              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: .placementRearranged)
-            }
-          } else if parent.is(TypeAliasDeclSyntax.self) {
-            return result.names.reversed().map { name in
-              ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: .placementRearranged)
-            }
-          }
-          
-          // No flags or reorderings to perform.
+        )
+      ]
+    default:
+      if let parent = result.scope.parent, result.scope.is(GenericParameterClauseSyntax.self) {
+        if let parentFunctionDecl = parent.as(FunctionDeclSyntax.self),
+          parentFunctionDecl.attributes.range.contains(lookupToken.position)
+        {
+          // If lookup started from inside function attributes, don't reverse.
           return result.names.map { name in
             ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: [])
           }
-        } else {
-          return result.names.map { name in
-            let shouldBeOmitted = name.identifier?.name == "Self" ? !result.scope.is(ProtocolDeclSyntax.self) : false
-            
-            return ConsumedLookupResult(
+        } else if parent.is(FunctionDeclSyntax.self) || parent.is(SubscriptDeclSyntax.self)
+          || result.scope.range.contains(lookupToken.position)
+        {
+          // If a result from function generic parameter clause or lookup started within it, reverse introduced names.
+          return result.names.reversed().map { name in
+            ConsumedLookupResult(
               rawName: name.identifier?.name ?? "",
               position: name.position,
-              flags: shouldBeOmitted ? [.shouldBeOptionallyOmitted] : []
+              flags: .placementRearranged
+            )
+          }
+        } else if let nominalTypeScope = Syntax(parent).asProtocol(SyntaxProtocol.self) as? NominalTypeDeclSyntax,
+          nominalTypeScope.inheritanceClause?.range.contains(lookupToken.position) ?? false
+        {
+          // If lookup started from nominal type inheritance clause, reverse introduced names.
+          return result.names.reversed().map { name in
+            ConsumedLookupResult(
+              rawName: name.identifier?.name ?? "",
+              position: name.position,
+              flags: .placementRearranged
+            )
+          }
+        } else if let initializerDecl = parent.as(InitializerDeclSyntax.self),
+          initializerDecl.range.contains(lookupToken.position)
+        {
+          // If lookup from inside the parent initializer decl, reverse introduced names.
+          return result.names.reversed().map { name in
+            ConsumedLookupResult(
+              rawName: name.identifier?.name ?? "",
+              position: name.position,
+              flags: .placementRearranged
+            )
+          }
+        } else if let parentTypeAlias = parent.as(TypeAliasDeclSyntax.self),
+          parentTypeAlias.initializer.range.contains(lookupToken.position)
+        {
+          // If lookup started from inside type alias initializer, reverse introduced names.
+          return result.names.reversed().map { name in
+            ConsumedLookupResult(
+              rawName: name.identifier?.name ?? "",
+              position: name.position,
+              flags: .placementRearranged
             )
           }
         }
+
+        // No flags or reorderings to perform.
+        return result.names.map { name in
+          ConsumedLookupResult(rawName: name.identifier?.name ?? "", position: name.position, flags: [])
+        }
+      } else {
+        return result.names.map { name in
+          // If a Self name not from protocol declaration, should be omitted if no match is found.
+          let shouldBeOmitted = name.identifier?.name == "Self" ? !result.scope.is(ProtocolDeclSyntax.self) : false
+
+          return ConsumedLookupResult(
+            rawName: name.identifier?.name ?? "",
+            position: name.position,
+            flags: shouldBeOmitted ? [.shouldBeOptionallyOmitted] : []
+          )
+        }
       }
     }
+  }
 }
 
 /// Adds all appropriate flags to `astResults` and `sllResults`.
@@ -253,40 +315,40 @@ private func flaggingPass(
   var encounteredASTNames = Set<ConsumedLookupResult>()
   var ignoreAt: AbsolutePosition?
   var wasLookupStopped = false
-  
+
   while i < max(astResults.count, sllResults.count) {
     var astResult: ConsumedLookupResult?
-    
+
     if astOffset + i < astResults.count {
       astResult = astResults[astOffset + i]
-      
+
       // Here only to not have to perform force unwraps later.
       guard let astResult else { break }
-      
+
       // Check if lookup was stopped earlier. If so, flag this result with lookupStopped.
       if wasLookupStopped {
         astResult.flags.insert(.lookupStopped)
       }
-      
+
       // Check if this is the end of ast lookup. If so, set wasLookupStopped to true.
       if astResult.isTheEndOfLookup {
         wasLookupStopped = true
       }
-      
+
       // Check if this is not the first encounter of this ast name. If so, should be omitted.
       if !astResult.shouldLookInMembers {
         let isFirstEncounter = !encounteredASTNames.contains(astResult)
-        
+
         if !isFirstEncounter {
           astResult.flags.insert(.shouldBeOmitted)
         }
       }
-      
+
       // Check if names are being currently ignored from at this position. If so, should be omitted.
       if astResult.position == ignoreAt {
         astResult.flags.insert(.shouldBeOmitted)
       }
-      
+
       // Check if this is an invalid introduction within the same declaration. If so, should be omitted.
       if isInvalidFirstNameInDeclarationIntroduction(
         sourceFile: sourceFileSyntax,
@@ -295,48 +357,49 @@ private func flaggingPass(
       ) && astResult.name != "self" {
         astResult.flags.insert(.shouldBeOmitted)
       }
-      
+
       // Check if this name should be omitted. If so, continue the loop and add one to offset.
       if astResult.shouldBeOmitted {
         astOffset += 1
         continue
       }
     }
-    
+
     if i + sllOffset < sllResults.count {
       let sllResult = sllResults[i + sllOffset]
-      
+
       // Check if lookup was stopped earlier. If so, flag this result with lookupStopped.
       if wasLookupStopped {
         sllResult.flags.insert(.lookupStopped)
       }
-      
+
       if sllResult.shouldBeOptionallyOmitted {
         if let astResult,
-           astResult.name == sllResult.name {
+          astResult.name == sllResult.name
+        {
           sllResult.flags.remove(.shouldBeOptionallyOmitted)
         } else {
           sllResult.flags.insert(.shouldBeOmitted)
         }
       }
-      
+
       // Check if next results at this position should be ignored. If so, set ignoreAt and omit this name.
       if sllResult.ignoreNextFromHere && sllResult.position != ignoreAt {
         ignoreAt = sllResult.position
         sllResult.flags.insert(.shouldBeOmitted)
       }
-      
+
       // Check if this name should be omitted. If so, continue the loop and add one to offset.
       if sllResult.shouldBeOmitted {
         sllOffset += 1
         continue
       }
     }
-    
+
     if let astResult {
       encounteredASTNames.insert(astResult)
     }
-    
+
     i += 1
   }
 }
@@ -353,60 +416,60 @@ private func matchingPass(
   var astOffset = 0
   var sllOffset = 0
   var passed = true
-  
+
   while i < max(astResults.count, sllResults.count) {
     var prefix = ""
     var astResultStr = ""
     var sllResultStr = ""
-    
+
     var astResult: ConsumedLookupResult?
-    
+
     if astOffset + i < astResults.count {
       astResult = astResults[astOffset + i]
-      
+
       guard let astResult else { break }
-      
+
       if astResult.shouldBeOmitted {
-        consoleOutput += "> ℹ️ | Omitted ASTScope name: \(astResult.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
+        consoleOutput +=
+          "> ℹ️ | Omitted ASTScope name: \(astResult.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
         astOffset += 1
         continue
       }
-      
+
       astResultStr += astResult.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
     } else {
       astResultStr = "-----"
     }
-    
+
     var sllResult: ConsumedLookupResult?
-    
+
     if i + sllOffset < sllResults.count {
       sllResult = sllResults[i + sllOffset]
-      
+
       guard let sllResult else { break }
-      
+
       if sllResult.shouldBeOmitted {
-        consoleOutput += "> ℹ️ | Omitted SwiftLexicalLookup name: \(sllResult.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
+        consoleOutput +=
+          "> ℹ️ | Omitted SwiftLexicalLookup name: \(sllResult.consoleLogStr(sourceLocationConverter: sourceLocationConverter))\n"
         sllOffset += 1
         continue
       }
-      
+
       sllResultStr = sllResult.consoleLogStr(sourceLocationConverter: sourceLocationConverter)
     } else {
       sllResultStr = "-----"
     }
-    
+
     i += 1
-    
+
     guard astResult != nil || sllResult != nil else { continue }
-    
+
     if let astResult, let sllResult {
-      if (astResult.position == sllResult.position &&
-          astResult.name == sllResult.name) {
+      if (astResult.position == sllResult.position && astResult.name == sllResult.name) {
         prefix = "✅"
       } else if astResult.lookupStopped || sllResult.lookupStopped {
         prefix = "⏩"
-      } else if astResult.position == sllResult.position ||
-                astResult.name == sllResult.name {
+      } else if astResult.position == sllResult.position || astResult.name == sllResult.name {
         prefix = "⚠️"
         passed = false
       } else {
@@ -419,12 +482,13 @@ private func matchingPass(
       prefix = "❌"
       passed = false
     }
-    
-    consoleOutput += "> \(prefix) |\(astResultStr.addPaddingUpTo(characters: rowCharWidth))|\(sllResultStr.addPaddingUpTo(characters: rowCharWidth))"
-    
+
+    consoleOutput +=
+      "> \(prefix) |\(astResultStr.addPaddingUpTo(characters: rowCharWidth))|\(sllResultStr.addPaddingUpTo(characters: rowCharWidth))"
+
     consoleOutput += "\n"
   }
-  
+
   return passed
 }
 
@@ -434,7 +498,7 @@ private class ConsumedLookupResult: Hashable {
   var rawName: String
   var position: AbsolutePosition
   var flags: ConsumedLookupResultFlag
-  
+
   init(
     rawName: String,
     position: AbsolutePosition,
@@ -444,53 +508,49 @@ private class ConsumedLookupResult: Hashable {
     self.position = position
     self.flags = flags
   }
-  
+
   var name: String {
     shouldLookInMembers ? "" : rawName
   }
-  
+
   var isTheEndOfLookup: Bool {
     flags.contains(.endOfLookup)
   }
-  
+
   var shouldLookInMembers: Bool {
     flags.contains(.shouldLookInMembers)
   }
-  
+
   var resultPlacementRearranged: Bool {
     flags.contains(.placementRearranged)
   }
-  
+
   var shouldBeOmitted: Bool {
     flags.contains(.shouldBeOmitted)
   }
-  
+
   var shouldBeOptionallyOmitted: Bool {
     flags.contains(.shouldBeOptionallyOmitted)
   }
-  
+
   var ignoreNextFromHere: Bool {
     flags.contains(.ignoreNextFromHere)
   }
-  
+
   var lookupStopped: Bool {
     flags.contains(.lookupStopped)
   }
-  
+
   func consoleLogStr(sourceLocationConverter: SourceLocationConverter) -> String {
-    (isTheEndOfLookup ? "End here: " : "") +
-    (resultPlacementRearranged ? "↕️ " : "") +
-    (ignoreNextFromHere ? "Ignore next from: " : "") +
-    (shouldLookInMembers ? "Look memb: " : "\(name) ") +
-    sourceLocationConverter.location(for: position).lineWithColumn
+    (isTheEndOfLookup ? "End here: " : "") + (resultPlacementRearranged ? "↕️ " : "")
+      + (ignoreNextFromHere ? "Ignore next from: " : "") + (shouldLookInMembers ? "Look memb: " : "\(name) ")
+      + sourceLocationConverter.location(for: position).lineWithColumn
   }
-  
-  static func ==(lhs: ConsumedLookupResult, rhs: ConsumedLookupResult) -> Bool {
-    return lhs.rawName == rhs.rawName &&
-    lhs.position == rhs.position &&
-    lhs.flags == rhs.flags
+
+  static func == (lhs: ConsumedLookupResult, rhs: ConsumedLookupResult) -> Bool {
+    return lhs.rawName == rhs.rawName && lhs.position == rhs.position && lhs.flags == rhs.flags
   }
-  
+
   func hash(into hasher: inout Hasher) {
     hasher.combine(rawName)
     hasher.combine(position)
@@ -502,12 +562,24 @@ private class ConsumedLookupResult: Hashable {
 struct ConsumedLookupResultFlag: OptionSet, Hashable {
   let rawValue: Int
 
+  /// Indicates lookup ended at this name. Continue with
+  /// other names without matching and mark them as skipped.
   static let endOfLookup = ConsumedLookupResultFlag(rawValue: 1 << 0)
+  /// This name prompts client to look in members of associated scope.
   static let shouldLookInMembers = ConsumedLookupResultFlag(rawValue: 1 << 1)
+  /// The original position in result of this name
+  /// might be different than displayed.
   static let placementRearranged = ConsumedLookupResultFlag(rawValue: 1 << 2)
+  /// The name should be ignored.
   static let shouldBeOmitted = ConsumedLookupResultFlag(rawValue: 1 << 3)
+  /// If no match is found, this name should be ignored.
   static let shouldBeOptionallyOmitted = ConsumedLookupResultFlag(rawValue: 1 << 4)
+  /// Means that one of the previous
+  /// names indicated the end of lookup.
   static let lookupStopped = ConsumedLookupResultFlag(rawValue: 1 << 5)
+  /// Next names from associated position should be omitted.
+  /// Filtering is applied until then next name of this kind is found and
+  /// position used for ignoring is updated.
   static let ignoreNextFromHere = ConsumedLookupResultFlag(rawValue: 1 << 6)
 }
 
@@ -520,20 +592,20 @@ extension SourceLocation {
 extension String {
   fileprivate func addPaddingUpTo(characters charCount: Int) -> String {
     guard self.count < charCount else { return self }
-    
+
     let lengthDifference = charCount - self.count
-    
+
     var leftPad = ""
     var rightPad = ""
-    
+
     for _ in 0..<Int(floor(Double(lengthDifference) / 2.0)) {
       leftPad += " "
     }
-    
+
     for _ in 0..<Int(ceil(Double(lengthDifference) / 2.0)) {
       rightPad += " "
     }
-    
+
     return leftPad + self + rightPad
   }
 }

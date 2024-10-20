@@ -40,14 +40,17 @@ using namespace ast_scope;
 
 #pragma mark ASTScope
 
-class LoggingASTScopeDeclConsumer: public namelookup::AbstractASTScopeDeclConsumer {
+class LoggingASTScopeDeclConsumer
+    : public namelookup::AbstractASTScopeDeclConsumer {
 private:
   namelookup::AbstractASTScopeDeclConsumer *originalConsumer;
-  
+
 public:
   mutable SmallVector<BridgedConsumedLookupResult> recordedElements;
-  
-  LoggingASTScopeDeclConsumer(namelookup::AbstractASTScopeDeclConsumer *consumer) : originalConsumer(consumer) {}
+
+  LoggingASTScopeDeclConsumer(
+      namelookup::AbstractASTScopeDeclConsumer *consumer)
+      : originalConsumer(consumer) {}
 
   ~LoggingASTScopeDeclConsumer() = default;
 
@@ -55,6 +58,9 @@ public:
   ///
   /// Takes an array in order to batch the consumption before setting
   /// IndexOfFirstOuterResult when necessary.
+  ///
+  /// Additionally, each name is logged to `recordedElements` and
+  /// can be later used in validation of `SwiftLexicalLookup` result.
   ///
   /// \param baseDC either a type context or the local context of a
   /// `self` parameter declaration. See LookupResult for a discussion
@@ -64,51 +70,41 @@ public:
   bool consume(ArrayRef<ValueDecl *> values,
                NullablePtr<DeclContext> baseDC = nullptr) override {
     bool result = originalConsumer->consume(values, baseDC);
-    
+
     for (auto value : values) {
       if (auto sourceLoc = value->getLoc()) {
         recordedElements.push_back(BridgedConsumedLookupResult(
-                                                               value->getBaseIdentifier(),
-                                                               sourceLoc,
-                                                               result
-                                                               )
-                                   );
+            value->getBaseIdentifier(), sourceLoc, result));
       } else {
         // If sourceLoc is unavailable, use location of it's parent.
         recordedElements.push_back(BridgedConsumedLookupResult(
-                                                               value->getBaseIdentifier(),
-                                                               value->getDeclContext()->getAsDecl()->getLoc(),
-                                                               result
-                                                               )
-                                   );
+            value->getBaseIdentifier(),
+            value->getDeclContext()->getAsDecl()->getLoc(), result));
       }
     }
-    
+
     return result;
   };
 
   /// Look for members of a nominal type or extension scope.
   ///
+  /// Each call is recorded in `recordedElements` with a special flag set.
+  /// It can be later used in validation of `SwiftLexicalLookup` result.
+  ///
   /// \return true if the lookup should be stopped at this point.
   bool lookInMembers(const DeclContext *scopeDC) const override {
     bool result = originalConsumer->lookInMembers(scopeDC);
-    
+
     if (auto *extDecl = dyn_cast<ExtensionDecl>(scopeDC)) {
       recordedElements.push_back(BridgedConsumedLookupResult(
-                                                             Identifier(),
-                                                             extDecl->getExtendedTypeRepr()->getLoc(),
-                                                             0b10 + result
-                                                             )
-                                 );
+          Identifier(), extDecl->getExtendedTypeRepr()->getLoc(),
+          0b10 + result));
     } else {
       recordedElements.push_back(BridgedConsumedLookupResult(
-                                                             scopeDC->getSelfNominalTypeDecl()->getBaseIdentifier(),
-                                                             scopeDC->getAsDecl()->getLoc(),
-                                                             0b10 + result
-                                                             )
-                                 );
+          scopeDC->getSelfNominalTypeDecl()->getBaseIdentifier(),
+          scopeDC->getAsDecl()->getLoc(), 0b10 + result));
     }
-    
+
     return result;
   };
 
@@ -118,23 +114,13 @@ public:
   /// superset of those visited in consume().
   bool consumePossiblyNotInScope(ArrayRef<VarDecl *> values) override {
     bool result = originalConsumer->consumePossiblyNotInScope(values);
-    
-//    llvm::outs() << result;
-    
-//    for (auto value : values) {
-//      llvm::outs() << "Possibly not in scope: ";
-//      value->print(llvm::outs());
-//      llvm::outs() << "\n";
-//    }
-    
     return result;
   }
 
   /// Called right before looking at the parent scope of a BraceStmt.
   ///
   /// \return true if the lookup should be stopped at this point.
-  bool
-  finishLookupInBraceStmt(BraceStmt *stmt) override {
+  bool finishLookupInBraceStmt(BraceStmt *stmt) override {
     return originalConsumer->finishLookupInBraceStmt(stmt);
   }
 
@@ -160,19 +146,24 @@ void ASTScope::unqualifiedLookup(
 
   if (auto *s = SF->getASTContext().Stats)
     ++s->getFrontendCounters().NumASTScopeLookups;
-  
-  if (SF->getASTContext().LangOpts.hasFeature(Feature::UnqualifiedLookupValidation)) {
-    LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer = LoggingASTScopeDeclConsumer(&consumer);
-    
+
+  // Perform validation of SwiftLexicalLookup if option
+  // Feature::UnqualifiedLookupValidation is enabled and lookup was not
+  // performed in a macro.
+  if (SF->getASTContext().LangOpts.hasFeature(
+          Feature::UnqualifiedLookupValidation) &&
+      !SF->getEnclosingSourceFile()) {
+    LoggingASTScopeDeclConsumer loggingASTScopeDeclConsumer =
+        LoggingASTScopeDeclConsumer(&consumer);
+
     ASTScopeImpl::unqualifiedLookup(SF, loc, loggingASTScopeDeclConsumer);
-    
-    bool passed = swift_ASTGen_validateUnqualifiedLookup(SF->getExportedSourceFile(),
-                                           SF->getASTContext(),
-                                           loc,
-                                           loggingASTScopeDeclConsumer.finishLookupInBraceStmt(nullptr),
-                                           BridgedArrayRef(loggingASTScopeDeclConsumer.recordedElements.data(), loggingASTScopeDeclConsumer.recordedElements.size())
-                                           );
-    
+
+    bool passed = swift_ASTGen_validateUnqualifiedLookup(
+        SF->getExportedSourceFile(), SF->getASTContext(), loc,
+        loggingASTScopeDeclConsumer.finishLookupInBraceStmt(nullptr),
+        BridgedArrayRef(loggingASTScopeDeclConsumer.recordedElements.data(),
+                        loggingASTScopeDeclConsumer.recordedElements.size()));
+
     if (!passed) {
       SF->getASTContext().Diags.diagnose(loc, diag::lookup_outputs_dont_match);
     }
