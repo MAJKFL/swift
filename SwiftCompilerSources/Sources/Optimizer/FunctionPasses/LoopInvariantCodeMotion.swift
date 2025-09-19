@@ -643,7 +643,7 @@ private extension MovableInstructions {
 
   /// Hoist and sink scoped instructions.
   mutating func hoistWithSinkScopedInstructions(outOf loop: Loop, _ context: FunctionPassContext) -> Bool {
-    guard !loop.hasNoExitBlocks else {
+    guard !loop.hasNoExitBlocks, loop.exitBlocks.contains(where: { !context.deadEndBlocks.isDeadEnd($0) }) else {
       return false
     }
     
