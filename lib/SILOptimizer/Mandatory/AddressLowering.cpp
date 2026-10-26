@@ -4089,6 +4089,30 @@ protected:
 
   void visitEndBorrowInst(EndBorrowInst *end) {}
 
+  void visitEndLifetimeInst(EndLifetimeInst *end) {
+    end->setOperand(addrMat.materializeAddress(use->get()));
+  }
+
+  // No pass reads end_formal_scope after SILGenCleanup, which deletes the rest.
+  void visitEndFormalScopeInst(EndFormalScopeInst *efs) {
+    pass.deleter.forceDelete(efs);
+  }
+
+  void visitDiagnoseInst(DiagnoseInst *diagnose) {
+    diagnose->setOperand(addrMat.materializeAddress(use->get()));
+  }
+
+  void visitMergeIsolationRegionInst(MergeIsolationRegionInst *merge) {
+    SILValue addr = addrMat.materializeAddress(use->get());
+    merge->setOperand(use->getOperandNumber(), addr);
+  }
+
+  void visitDeinitExistentialValueInst(DeinitExistentialValueInst *deinit) {
+    SILValue addr = addrMat.materializeAddress(use->get());
+    builder.createDeinitExistentialAddr(deinit->getLoc(), addr);
+    pass.deleter.forceDelete(deinit);
+  }
+
   // In Raw SIL, extend_lifetime marks the end of a variable's scope for values
   // that have no destroy_value. There is no address form of the instruction:
   // the value's storage is already scoped by its alloc_stack.
@@ -4634,16 +4658,11 @@ protected:
   UNIMPLEMENTED_OPAQUE_OPERAND(Assign)
   UNIMPLEMENTED_OPAQUE_OPERAND(AssignOrInit)
   UNIMPLEMENTED_OPAQUE_OPERAND(BorrowedFrom)
-  UNIMPLEMENTED_OPAQUE_OPERAND(DeinitExistentialValue)
   UNIMPLEMENTED_OPAQUE_OPERAND(DereferenceAddrBorrow)
   UNIMPLEMENTED_OPAQUE_OPERAND(DereferenceBorrow)
-  UNIMPLEMENTED_OPAQUE_OPERAND(Diagnose)
   UNIMPLEMENTED_OPAQUE_OPERAND(DropDeinit)
   UNIMPLEMENTED_OPAQUE_OPERAND(EndCOWMutation)
-  UNIMPLEMENTED_OPAQUE_OPERAND(EndFormalScope)
   UNIMPLEMENTED_OPAQUE_OPERAND(EndInitLetRef)
-  UNIMPLEMENTED_OPAQUE_OPERAND(EndLifetime)
-  UNIMPLEMENTED_OPAQUE_OPERAND(MergeIsolationRegion)
   UNIMPLEMENTED_OPAQUE_OPERAND(RefToRawPointer)
   UNIMPLEMENTED_OPAQUE_OPERAND(SelectEnumAddr)
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedOwnership)
