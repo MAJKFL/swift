@@ -1,0 +1,33 @@
+// RUN: %target-sil-opt -sil-print-types -address-lowering -enable-sil-opaque-values -module-name Swift -sil-verify-all %s | %FileCheck %s
+
+import Builtin
+
+sil_stage raw
+
+// CHECK-LABEL: sil [ossa] @extend_lifetime_dead_end : $@convention(thin) <T> (@in_guaranteed T) -> () {
+// CHECK-NOT:     extend_lifetime
+// CHECK:       bb2:
+// CHECK-NEXT:    unreachable
+// CHECK-LABEL: } // end sil function 'extend_lifetime_dead_end'
+sil [ossa] @extend_lifetime_dead_end : $@convention(thin) <T> (@in_guaranteed T) -> () {
+bb0(%0 : @guaranteed $T):
+  %1 = copy_value %0 : $T
+  cond_br undef, bb1, bb2
+bb1:
+  destroy_value %1 : $T
+  %r = tuple ()
+  return %r : $()
+bb2:
+  extend_lifetime %1 : $T
+  unreachable
+}
+
+// CHECK-LABEL: sil [ossa] @explicit_copy_value : $@convention(thin) <T> (@in_guaranteed T) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : $*T):
+// CHECK-NEXT:    explicit_copy_addr %1 to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'explicit_copy_value'
+sil [ossa] @explicit_copy_value : $@convention(thin) <T> (@in_guaranteed T) -> @out T {
+bb0(%0 : @guaranteed $T):
+  %1 = explicit_copy_value %0 : $T
+  return %1 : $T
+}
