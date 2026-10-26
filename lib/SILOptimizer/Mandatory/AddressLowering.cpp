@@ -3727,6 +3727,8 @@ enum class OpaqueBuiltinKind {
   /// Opaque operands are replaced by their storage address. The result is
   /// never opaque.
   OperandsByAddress,
+  /// An opaque result becomes a leading address operand. No operand is opaque.
+  IndirectResult,
   PolymorphicBinary,
   AddressOfBorrow,
   UnprotectedAddressOfBorrow,
@@ -3902,6 +3904,10 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::TaskPushDeadline:
     return OpaqueBuiltinKind::OperandsByAddress;
 
+  case BuiltinValueKind::PrepareInitialization:
+  case BuiltinValueKind::TaskRunInline:
+    return OpaqueBuiltinKind::IndirectResult;
+
   case BuiltinValueKind::AddressOfBorrowOpaque:
     return OpaqueBuiltinKind::AddressOfBorrow;
   case BuiltinValueKind::UnprotectedAddressOfBorrowOpaque:
@@ -3910,8 +3916,6 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
     return OpaqueBuiltinKind::ZeroInitializer;
 
   case BuiltinValueKind::COWBufferForReading:
-  case BuiltinValueKind::PrepareInitialization:
-  case BuiltinValueKind::TaskRunInline:
     return OpaqueBuiltinKind::Unimplemented;
 
   case BuiltinValueKind::None:
@@ -4066,6 +4070,7 @@ protected:
       visitAddressOfBorrowBuiltinInst(bi, /*stackProtected=*/false);
       break;
     case OpaqueBuiltinKind::NeverOpaque:
+    case OpaqueBuiltinKind::IndirectResult:
     case OpaqueBuiltinKind::ZeroInitializer:
       return unexpectedOpaqueUse(bi);
     case OpaqueBuiltinKind::Unimplemented:
@@ -5341,7 +5346,8 @@ protected:
   }
 
   void visitBuiltinInst(BuiltinInst *bi) {
-    switch (classifyOpaqueBuiltin(bi)) {
+    auto kind = classifyOpaqueBuiltin(bi);
+    switch (kind) {
     case OpaqueBuiltinKind::ZeroInitializer: {
       // Value-form `builtin "zeroInitializer"() : $T` with an opaque T.
       assert(bi->getNumOperands() == 0 &&
@@ -5352,7 +5358,8 @@ protected:
       storage.markRewritten();
       break;
     }
-    case OpaqueBuiltinKind::PolymorphicBinary: {
+    case OpaqueBuiltinKind::PolymorphicBinary:
+    case OpaqueBuiltinKind::IndirectResult: {
       // Rewrite the value-form (with already address-converted operands,
       // see UseRewriter::visitBuiltinInst above):
       //   %result = builtin "generic_add"<T>(%0 : $*T, %1 : $*T) : $T
@@ -5367,7 +5374,8 @@ protected:
         // means opaque operands, which the UseRewriter has already given
         // addresses. However, nothing enforces that on parsed SIL, and mixing
         // a value operand into the address form below would go unnoticed.
-        assert(arg->getType().isAddress() &&
+        assert((kind == OpaqueBuiltinKind::IndirectResult ||
+                arg->getType().isAddress()) &&
                "polymorphic builtin operand should already be rewritten");
         newArgs.push_back(arg);
       }
