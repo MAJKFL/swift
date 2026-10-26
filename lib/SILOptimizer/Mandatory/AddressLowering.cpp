@@ -1085,11 +1085,17 @@ static Operand *getProjectedDefOperand(SILValue value) {
     LLVM_FALLTHROUGH;
   }
   case ValueKind::StructExtractInst:
+    // A trivial subobject may be used after its aggregate is destroyed.
+    if (value->getType().isTrivial(*value->getFunction()))
+      return nullptr;
+    LLVM_FALLTHROUGH;
   case ValueKind::OpenExistentialValueInst:
   case ValueKind::OpenExistentialBoxValueInst:
     assert(value->getOwnershipKind() == OwnershipKind::Guaranteed);
     return &cast<SingleValueInstruction>(value)->getAllOperands()[0];
   case ValueKind::TuplePackExtractInst:
+    if (value->getType().isTrivial(*value->getFunction()))
+      return nullptr;
     assert(value->getOwnershipKind() == OwnershipKind::Guaranteed);
     return &cast<SingleValueInstruction>(value)->getAllOperands()[1];
   }
@@ -1838,6 +1844,12 @@ public:
       : pass(pass),
         projectionBuilder(pass.getBuilder(
             getProjectionInsertionPoint(projectedValue, pass)->getIterator())),
+        moveBuilder(moveBuilder) {}
+
+  AddressMaterialization(AddressLoweringState &pass,
+                         SILBasicBlock::iterator projectionPt,
+                         SILBuilder &moveBuilder)
+      : pass(pass), projectionBuilder(pass.getBuilder(projectionPt)),
         moveBuilder(moveBuilder) {}
 
   /// Return the address of the storage for `origValue`. This may involve
@@ -4747,6 +4759,17 @@ emitEndBorrowsAtEnclosingGuaranteedBoundary(SILValue lifetimeToEnd,
 
 // Extract from an opaque struct or tuple.
 void UseRewriter::emitExtract(SingleValueInstruction *extractInst) {
+  if (extractInst->getType().isAddressOnly(*pass.function) &&
+      !getProjectedDefOperand(extractInst)) {
+    AddressMaterialization srcMat(pass, extractInst->getIterator(), builder);
+    SILValue srcAddr = srcMat.materializeDefProjection(extractInst);
+    AddressMaterialization destMat(pass, extractInst, builder);
+    SILValue destAddr = destMat.materializeAddress(extractInst);
+    builder.createCopyAddr(extractInst->getLoc(), srcAddr, destAddr, IsNotTake,
+                           IsInitialization);
+    markRewritten(extractInst, destAddr);
+    return;
+  }
   AddressMaterialization addrMat(pass, extractInst, builder);
   SILValue extractAddr = addrMat.materializeDefProjection(extractInst);
 

@@ -3331,6 +3331,37 @@ exit:
   return %retval : $()
 }
 
+// The trivial field is used after its aggregate is destroyed.
+// CHECK-LABEL: sil [ossa] @test_struct_extract_1_trivial : {{.*}} {
+// CHECK:       bb0(%0 : $*T, %1 : $*BigRef<T>):
+// CHECK-NEXT:    [[A:%.*]] = struct_element_addr %1 : $*BigRef<T>, #BigRef.a
+// CHECK-NEXT:    copy_addr [[A]] to [init] %0 : $*T
+// CHECK-NEXT:    destroy_addr %1 : $*BigRef<T>
+// CHECK-LABEL: } // end sil function 'test_struct_extract_1_trivial'
+sil [ossa] @test_struct_extract_1_trivial : $@convention(thin) <T where T : _Trivial> (@in BigRef<T>) -> @out T {
+bb0(%0 : @owned $BigRef<T>):
+  %1 = begin_borrow %0 : $BigRef<T>
+  %2 = struct_extract %1 : $BigRef<T>, #BigRef.a
+  end_borrow %1 : $BigRef<T>
+  destroy_value %0 : $BigRef<T>
+  return %2 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @test_tuple_extract_1_trivial : {{.*}} {
+// CHECK:       bb0(%0 : $*T, %1 : $*(T, Klass)):
+// CHECK-NEXT:    [[A:%.*]] = tuple_element_addr %1 : $*(T, Klass), 0
+// CHECK-NEXT:    copy_addr [[A]] to [init] %0 : $*T
+// CHECK-NEXT:    destroy_addr %1 : $*(T, Klass)
+// CHECK-LABEL: } // end sil function 'test_tuple_extract_1_trivial'
+sil [ossa] @test_tuple_extract_1_trivial : $@convention(thin) <T where T : _Trivial> (@in (T, Klass)) -> @out T {
+bb0(%0 : @owned $(T, Klass)):
+  %1 = begin_borrow %0 : $(T, Klass)
+  %2 = tuple_extract %1 : $(T, Klass), 0
+  end_borrow %1 : $(T, Klass)
+  destroy_value %0 : $(T, Klass)
+  return %2 : $T
+}
+
 // CHECK-LABEL: sil [ossa] @test_tuple_pack_extract : {{.*}} {
 // CHECK:       bb0([[TUPLE_PACK_ADDR:%[^,]+]] :
 // CHECK:         [[INDEX:%[^,]+]] = dynamic_pack_index
@@ -3349,6 +3380,28 @@ entry(%tuple_addr : $*(repeat each T)):
   %borrow = function_ref @borrowT : $@convention(thin) <T> (@in_guaranteed T) -> ()
   apply %borrow<@pack_element(20) U_1>(%elt) : $@convention(thin) <T> (@in_guaranteed T) -> ()
   end_borrow %tuple : $(repeat each T)
+  %retval = tuple ()
+  return %retval : $()
+}
+
+// The element address follows the pack index.
+// CHECK-LABEL: sil [ossa] @test_tuple_pack_extract_trivial : {{.*}} {
+// CHECK:         [[TUPLE:%[^,]+]] = alloc_stack $(repeat each T)
+// CHECK:         [[INDEX:%[^,]+]] = dynamic_pack_index
+// CHECK:         [[ELEMENT:%[^,]+]] = alloc_stack $@pack_element([[UUID:[0-9]+]]) each U_1
+// CHECK-NEXT:    [[ELEMENT_ADDR:%[^,]+]] = tuple_pack_element_addr [[INDEX]] of [[TUPLE]] : {{.*}} as $*@pack_element([[UUID]]) each U_1
+// CHECK-NEXT:    copy_addr [[ELEMENT_ADDR]] to [init] [[ELEMENT]]
+// CHECK:         apply {{%[^,]+}}<@pack_element([[UUID]]) each U_1>([[ELEMENT]])
+// CHECK-LABEL: } // end sil function 'test_tuple_pack_extract_trivial'
+sil [ossa] @test_tuple_pack_extract_trivial : $@convention(thin) <each T where repeat each T : _Trivial> (@in_guaranteed (repeat each T)) -> () {
+entry(%tuple_addr : $*(repeat each T)):
+  %tuple = load [trivial] %tuple_addr : $*(repeat each T)
+  %zero = integer_literal $Builtin.Word, 0
+  %index = dynamic_pack_index %zero of $Pack{repeat each T}
+  %opened = open_pack_element %index of <each U_1 where repeat each U_1 : _Trivial> at <Pack{repeat each T}>, shape $U_1, id 21
+  %elt = tuple_pack_extract %index of %tuple : $(repeat each T) as $@pack_element(21) U_1
+  %borrow = function_ref @borrowT : $@convention(thin) <T> (@in_guaranteed T) -> ()
+  apply %borrow<@pack_element(21) U_1>(%elt) : $@convention(thin) <T> (@in_guaranteed T) -> ()
   %retval = tuple ()
   return %retval : $()
 }
