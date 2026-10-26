@@ -1059,6 +1059,10 @@ static Operand *getProjectedDefOperand(SILValue value) {
   case ValueKind::MoveValueInst:
     return &cast<MoveValueInst>(value)->getOperandRef();
 
+  case ValueKind::UncheckedOwnershipInst:
+  case ValueKind::UncheckedOwnershipConversionInst:
+    return &cast<SingleValueInstruction>(value)->getAllOperands()[0];
+
   case ValueKind::MultipleValueInstructionResult: {
     SILInstruction *destructure =
         cast<MultipleValueInstructionResult>(value)->getParent();
@@ -4266,6 +4270,19 @@ protected:
     markRewritten(inst, replacement);
   }
 
+  void visitUncheckedOwnershipInst(UncheckedOwnershipInst *inst) {
+    assert(use == getProjectedDefOperand(inst));
+    markRewritten(inst,
+                  pass.valueStorageMap.getStorage(use->get()).storageAddress);
+  }
+
+  void visitUncheckedOwnershipConversionInst(
+      UncheckedOwnershipConversionInst *inst) {
+    assert(use == getProjectedDefOperand(inst));
+    markRewritten(inst,
+                  pass.valueStorageMap.getStorage(use->get()).storageAddress);
+  }
+
   void visitMoveValueInst(MoveValueInst *mvi);
 
   void visitMoveOnlyWrapperToCopyableValueInst(
@@ -4665,8 +4682,6 @@ protected:
   UNIMPLEMENTED_OPAQUE_OPERAND(EndInitLetRef)
   UNIMPLEMENTED_OPAQUE_OPERAND(RefToRawPointer)
   UNIMPLEMENTED_OPAQUE_OPERAND(SelectEnumAddr)
-  UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedOwnership)
-  UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedOwnershipConversion)
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedRefCast)
 
 #undef NO_OPAQUE_OPERAND
@@ -5633,6 +5648,8 @@ protected:
   REWRITTEN_BY_USE(TupleExtract)
   REWRITTEN_BY_USE(TuplePackExtract)
   REWRITTEN_BY_USE(UncheckedEnumData)
+  REWRITTEN_BY_USE(UncheckedOwnership)
+  REWRITTEN_BY_USE(UncheckedOwnershipConversion)
 
   // Sema rejects reference storage of the only class-bound address-only type,
   // a generic constrained to a COM interface and to no superclass.
@@ -5657,8 +5674,6 @@ protected:
   UNIMPLEMENTED_OPAQUE_RESULT(RawPointerToRef)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnum)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnumAddr)
-  UNIMPLEMENTED_OPAQUE_RESULT(UncheckedOwnership)
-  UNIMPLEMENTED_OPAQUE_RESULT(UncheckedOwnershipConversion)
   UNIMPLEMENTED_OPAQUE_RESULT(UncheckedRefCast)
   UNIMPLEMENTED_OPAQUE_RESULT(UncheckedTrivialBitCast)
 
