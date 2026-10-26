@@ -674,6 +674,9 @@ static void checkGenericParams(GenericContext *ownerCtx) {
     checkInheritanceClause(gp);
   }
 
+  if (ctx.LangOpts.EnableCOMInterop)
+    com::validateGenericParams(ownerCtx);
+
   // Force resolution of interface types written in requirements here to check
   // that generic types satisfy generic requirements, and so on.
   WhereClauseOwner(ownerCtx)

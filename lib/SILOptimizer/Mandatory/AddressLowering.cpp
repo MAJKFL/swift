@@ -4307,6 +4307,8 @@ protected:
   }
 
   void visitStrongCopyUnownedValueInst(StrongCopyUnownedValueInst *scuvi) {
+    assert(!scuvi->getType().isAddressOnly(*pass.function) &&
+           "the result is never opaque");
     auto sourceAddr = addrMat.materializeAddress(use->get());
     SILValue value =
         builder.createLoadUnowned(scuvi->getLoc(), sourceAddr, IsNotTake);
@@ -4315,6 +4317,8 @@ protected:
   }
 
   void visitStrongCopyWeakValueInst(StrongCopyWeakValueInst *scwvi) {
+    assert(!scwvi->getType().isAddressOnly(*pass.function) &&
+           "the result is never opaque");
     auto sourceAddr = addrMat.materializeAddress(use->get());
     SILValue value =
         builder.createLoadWeak(scwvi->getLoc(), sourceAddr, IsNotTake);
@@ -4604,6 +4608,16 @@ protected:
   NO_OPAQUE_OPERAND(TupleAddrConstructor)
   NO_OPAQUE_OPERAND(Vector)
 
+  // The only class-bound address-only type is a generic constrained to a COM
+  // interface and to no superclass. Sema rejects reference storage of it, and
+  // a COM-constrained generic that is also an actor.
+  NO_OPAQUE_OPERAND(ExtractExecutor)
+  NO_OPAQUE_OPERAND(HopToExecutor)
+  NO_OPAQUE_OPERAND(StoreUnowned)
+  NO_OPAQUE_OPERAND(StoreWeak)
+  NO_OPAQUE_OPERAND(UnownedCopyValue)
+  NO_OPAQUE_OPERAND(WeakCopyValue)
+
   // SILGen rejects an address-only operand.
   NO_OPAQUE_OPERAND(BeginCOWMutation)
   NO_OPAQUE_OPERAND(InitExistentialRef)
@@ -4629,18 +4643,12 @@ protected:
   UNIMPLEMENTED_OPAQUE_OPERAND(EndFormalScope)
   UNIMPLEMENTED_OPAQUE_OPERAND(EndInitLetRef)
   UNIMPLEMENTED_OPAQUE_OPERAND(EndLifetime)
-  UNIMPLEMENTED_OPAQUE_OPERAND(ExtractExecutor)
-  UNIMPLEMENTED_OPAQUE_OPERAND(HopToExecutor)
   UNIMPLEMENTED_OPAQUE_OPERAND(MergeIsolationRegion)
   UNIMPLEMENTED_OPAQUE_OPERAND(RefToRawPointer)
   UNIMPLEMENTED_OPAQUE_OPERAND(SelectEnumAddr)
-  UNIMPLEMENTED_OPAQUE_OPERAND(StoreUnowned)
-  UNIMPLEMENTED_OPAQUE_OPERAND(StoreWeak)
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedOwnership)
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedOwnershipConversion)
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedRefCast)
-  UNIMPLEMENTED_OPAQUE_OPERAND(UnownedCopyValue)
-  UNIMPLEMENTED_OPAQUE_OPERAND(WeakCopyValue)
 
 #undef NO_OPAQUE_OPERAND
 #undef UNIMPLEMENTED_OPAQUE_OPERAND
@@ -5607,6 +5615,14 @@ protected:
   REWRITTEN_BY_USE(TuplePackExtract)
   REWRITTEN_BY_USE(UncheckedEnumData)
 
+  // Sema rejects reference storage of the only class-bound address-only type,
+  // a generic constrained to a COM interface and to no superclass.
+  NO_OPAQUE_RESULT(LoadUnowned)
+  NO_OPAQUE_RESULT(LoadWeak)
+  NO_OPAQUE_RESULT(StrongCopyUnmanagedValue)
+  NO_OPAQUE_RESULT(StrongCopyUnownedValue)
+  NO_OPAQUE_RESULT(StrongCopyWeakValue)
+
   // SILGen rejects an address-only result.
   NO_OPAQUE_RESULT(BeginCOWMutation)
   NO_OPAQUE_RESULT(BridgeObjectToRef)
@@ -5618,15 +5634,10 @@ protected:
   UNIMPLEMENTED_OPAQUE_RESULT(EndApply)
   UNIMPLEMENTED_OPAQUE_RESULT(EndCOWMutation)
   UNIMPLEMENTED_OPAQUE_RESULT(EndInitLetRef)
-  UNIMPLEMENTED_OPAQUE_RESULT(LoadUnowned)
-  UNIMPLEMENTED_OPAQUE_RESULT(LoadWeak)
   UNIMPLEMENTED_OPAQUE_RESULT(MakeAddrBorrow)
   UNIMPLEMENTED_OPAQUE_RESULT(RawPointerToRef)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnum)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnumAddr)
-  UNIMPLEMENTED_OPAQUE_RESULT(StrongCopyUnmanagedValue)
-  UNIMPLEMENTED_OPAQUE_RESULT(StrongCopyUnownedValue)
-  UNIMPLEMENTED_OPAQUE_RESULT(StrongCopyWeakValue)
   UNIMPLEMENTED_OPAQUE_RESULT(UncheckedOwnership)
   UNIMPLEMENTED_OPAQUE_RESULT(UncheckedOwnershipConversion)
   UNIMPLEMENTED_OPAQUE_RESULT(UncheckedRefCast)

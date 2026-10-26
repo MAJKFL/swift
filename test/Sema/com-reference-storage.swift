@@ -79,3 +79,58 @@ final class InterfaceHolder {
     self.optionalClassValue = classValue
   }
 }
+
+// A COM-constrained generic with no superclass can hold an interface pointer,
+// even when it is class-bound.
+func genericReferences<T: IClassValue, U: IValue>(_ value: T, _ other: U) {
+  weak var weakValue: T? = value
+  // expected-error@-1 {{'T' is incompatible with 'weak' references}}
+  unowned var unownedValue: T = value
+  // expected-error@-1 {{'T' is incompatible with 'unowned' references}}
+  unowned(unsafe) var unmanagedValue: T = value
+  // expected-error@-1 {{'T' is incompatible with 'unowned(unsafe)' references}}
+  weak var weakOther: U? = other
+  // expected-error@-1 {{'U' is incompatible with 'weak' references}}
+
+  weakValue = nil
+  unownedValue = value
+  unmanagedValue = value
+  weakOther = nil
+  _ = (weakValue, unownedValue, unmanagedValue, weakOther)
+
+  _ = { [weak value] in
+    // expected-error@-1 {{'T' is incompatible with 'weak' references}}
+    value = nil
+    return value
+  }
+  _ = { [unowned value] in value }
+  // expected-error@-1 {{'T' is incompatible with 'unowned' references}}
+}
+
+final class GenericHolder<T: IClassValue> {
+  weak var weakValue: T?
+  // expected-error@-1 {{'T' is incompatible with 'weak' references}}
+  unowned var unownedValue: T
+  // expected-error@-1 {{'T' is incompatible with 'unowned' references}}
+  unowned(unsafe) var unmanagedValue: T
+  // expected-error@-1 {{'T' is incompatible with 'unowned(unsafe)' references}}
+
+  init(_ value: T) {
+    weakValue = value
+    unownedValue = value
+    unmanagedValue = value
+  }
+}
+
+// A superclass makes the value a Swift object reference.
+class Base {}
+
+func superclassReferences<T: Base & IClassValue>(_ value: T) {
+  weak var weakValue: T? = value
+  unowned var unownedValue: T = value
+  unowned(unsafe) var unmanagedValue: T = value
+  weakValue = nil
+  unownedValue = value
+  unmanagedValue = value
+  _ = (weakValue, unownedValue, unmanagedValue)
+}

@@ -2428,6 +2428,9 @@ ERROR(com_conditional_conformance, none,
       (Type, Type))
 ERROR(com_actor_implementation, none,
       "actor %0 cannot provide a COM implementation", (DeclName))
+ERROR(com_generic_actor, none,
+      "generic parameter %0 cannot conform to both COM interface %1 and %2",
+      (Type, Type, Type))
 ERROR(com_non_native_implementation, none,
       "class %0 cannot provide a COM implementation because it does not use the native Swift object model",
       (DeclName))

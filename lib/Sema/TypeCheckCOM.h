@@ -17,9 +17,12 @@
 
 namespace swift {
 class ClassDecl;
+class GenericContext;
+class GenericSignature;
 class ProtocolDecl;
 class NominalTypeDecl;
 class ProtocolConformance;
+class Type;
 enum class KnownProtocolKind : uint8_t;
 
 namespace com {
@@ -36,6 +39,15 @@ void validateProtocol(ProtocolDecl *PD);
 
 /// Diagnose restrictions on an explicitly declared COM conformance.
 void validateConformance(ProtocolConformance *conformance);
+
+/// Whether \p type is a generic type constrained to a COM interface and to no
+/// superclass. Such a value may hold a foreign interface pointer. \p sig
+/// resolves a type parameter.
+bool hasOpaqueRepresentation(Type type, GenericSignature sig);
+
+/// Diagnose generic parameters of \p ctx that no type can satisfy because of
+/// a COM interface constraint.
+void validateGenericParams(GenericContext *ctx);
 }
 } // end namespace swift
 

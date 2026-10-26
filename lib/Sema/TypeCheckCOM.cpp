@@ -18,6 +18,7 @@
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/GenericSignature.h"
 #include "swift/AST/ImportCache.h"
 #include "swift/AST/KnownProtocols.h"
 #include "swift/AST/Module.h"
@@ -584,6 +585,50 @@ void com::validateConformance(ProtocolConformance *conformance) {
   if (!normal->getConditionalRequirements().empty())
     diagnostics.diagnose(normal->getLoc(), diag::com_conditional_conformance,
                          type, protocol->getDeclaredInterfaceType());
+}
+
+bool com::hasOpaqueRepresentation(Type type, GenericSignature sig) {
+  if (auto *archetype = type->getAs<ArchetypeType>())
+    return !isa<ExistentialArchetypeType>(archetype) &&
+           !archetype->getSuperclass() &&
+           archetype->hasCOMInterfaceConstraint();
+  if (!type->isTypeParameter() || !sig)
+    return false;
+  return !sig->getSuperclassBound(type) &&
+         llvm::any_of(sig->getRequiredProtocols(type), [](ProtocolDecl *PD) {
+           return PD->isCOMInterface();
+         });
+}
+
+void com::validateGenericParams(GenericContext *ctx) {
+  auto *params = ctx->getGenericParams();
+  auto sig = ctx->getGenericSignature();
+  if (!params || !sig)
+    return;
+
+  auto &C = ctx->getASTContext();
+  for (auto *param : *params) {
+    auto type = param->getDeclaredInterfaceType();
+    if (!hasOpaqueRepresentation(type, sig))
+      continue;
+
+    // An actor cannot implement a COM interface.
+    for (auto kind :
+         {KnownProtocolKind::Actor, KnownProtocolKind::DistributedActor}) {
+      auto *actor = C.getProtocol(kind);
+      if (!actor || !sig->requiresProtocol(type, actor))
+        continue;
+      auto protocols = sig->getRequiredProtocols(type);
+      auto *interface = *llvm::find_if(
+          protocols, [](ProtocolDecl *PD) { return PD->isCOMInterface(); });
+      auto loc = param->isImplicit() ? ctx->getAsDecl()->getLoc()
+                                     : param->getLoc();
+      C.Diags.diagnose(loc, diag::com_generic_actor, type,
+                       interface->getDeclaredInterfaceType(),
+                       actor->getDeclaredInterfaceType());
+      break;
+    }
+  }
 }
 
 namespace {

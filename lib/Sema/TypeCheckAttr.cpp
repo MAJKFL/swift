@@ -16,6 +16,7 @@
 
 #include "MiscDiagnostics.h"
 #include "TypeCheckAvailability.h"
+#include "TypeCheckCOM.h"
 #include "TypeCheckConcurrency.h"
 #include "TypeCheckDistributed.h"
 #include "TypeCheckEmbedded.h"
@@ -6140,9 +6141,11 @@ Type TypeChecker::checkReferenceOwnershipAttr(VarDecl *var, Type type,
     underlyingType = type;
 
   auto sig = var->getDeclContext()->getGenericSignatureOfContext();
-  if ((ownershipKind == ReferenceOwnership::Weak ||
-       ownershipKind == ReferenceOwnership::Unowned) &&
-      underlyingType->isCOMExistentialType()) {
+  // Unlike a COM existential, a COM generic has no unowned(unsafe) storage.
+  if (((ownershipKind == ReferenceOwnership::Weak ||
+        ownershipKind == ReferenceOwnership::Unowned) &&
+       underlyingType->isCOMExistentialType()) ||
+      com::hasOpaqueRepresentation(underlyingType, sig)) {
     Diags.diagnose(attr->getLocation(),
                    diag::invalid_ownership_incompatible_class, underlyingType,
                    ownershipKind);
