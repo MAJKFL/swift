@@ -1,0 +1,77 @@
+// RUN: %target-sil-opt -sil-print-types -address-lowering -enable-sil-opaque-values -module-name Swift -sil-verify-all %s | %FileCheck %s
+
+import Builtin
+
+sil_stage raw
+
+typealias Int = Builtin.Int64
+
+struct SA<T> {
+  @_hasStorage var _x: Int { get set }
+  var x: T {
+    @storageRestrictions(accesses: _x) init
+    get
+    set
+  }
+}
+
+sil @SA_x_init : $@convention(thin) <T> (@in T, @inout Int, @thin SA<T>.Type) -> ()
+sil @SA_x_set : $@convention(method) <T> (@in T, @inout SA<T>) -> ()
+
+// CHECK-LABEL: sil [ossa] @assign_unknown : $@convention(thin) <T> (@inout T, @in T) -> () {
+// CHECK:       bb0(%0 : $*T, %1 : $*T):
+// CHECK-NEXT:    copy_addr [take] %1 to %0 : $*T
+// CHECK-LABEL: } // end sil function 'assign_unknown'
+sil [ossa] @assign_unknown : $@convention(thin) <T> (@inout T, @in T) -> () {
+bb0(%0 : $*T, %1 : @owned $T):
+  assign %1 to %0 : $*T
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @assign_init : $@convention(thin) <T> (@in T) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : $*T):
+// CHECK:         [[S:%.*]] = alloc_stack $T
+// CHECK:         copy_addr [take] %1 to [init] [[S]] : $*T
+// CHECK:         copy_addr [take] [[S]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'assign_init'
+sil [ossa] @assign_init : $@convention(thin) <T> (@in T) -> @out T {
+bb0(%0 : @owned $T):
+  %1 = alloc_stack $T
+  assign %0 to [init] %1 : $*T
+  %2 = load [take] %1 : $*T
+  dealloc_stack %1 : $*T
+  return %2 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @assign_reassign_copy : $@convention(thin) <T> (@inout T, @in_guaranteed T) -> () {
+// CHECK:       bb0(%0 : $*T, %1 : $*T):
+// CHECK-NEXT:    [[A:%.*]] = alloc_stack $T
+// CHECK-NEXT:    copy_addr %1 to [init] [[A]] : $*T
+// CHECK-NEXT:    copy_addr [take] [[A]] to %0 : $*T
+// CHECK-LABEL: } // end sil function 'assign_reassign_copy'
+sil [ossa] @assign_reassign_copy : $@convention(thin) <T> (@inout T, @in_guaranteed T) -> () {
+bb0(%0 : $*T, %1 : @guaranteed $T):
+  %2 = copy_value %1 : $T
+  assign %2 to [reassign] %0 : $*T
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @assign_or_init : $@convention(thin) <T> (@inout SA<T>, @in T) -> () {
+// CHECK:       bb0(%0 : $*SA<T>, %1 : $*T):
+// CHECK:         assign_or_init #SA.x, self %0 : $*SA<T>, value %1 : $*T, init
+// CHECK-LABEL: } // end sil function 'assign_or_init'
+sil [ossa] @assign_or_init : $@convention(thin) <T> (@inout SA<T>, @in T) -> () {
+bb0(%0 : $*SA<T>, %1 : @owned $T):
+  %2 = function_ref @SA_x_init : $@convention(thin) <τ_0_0> (@in τ_0_0, @inout Int, @thin SA<τ_0_0>.Type) -> ()
+  %3 = metatype $@thin SA<T>.Type
+  %4 = partial_apply [callee_guaranteed] [on_stack] %2<T>(%3) : $@convention(thin) <τ_0_0> (@in τ_0_0, @inout Int, @thin SA<τ_0_0>.Type) -> ()
+  %5 = function_ref @SA_x_set : $@convention(method) <τ_0_0> (@in τ_0_0, @inout SA<τ_0_0>) -> ()
+  %6 = partial_apply [callee_guaranteed] [on_stack] %5<T>(%0) : $@convention(method) <τ_0_0> (@in τ_0_0, @inout SA<τ_0_0>) -> ()
+  assign_or_init #SA.x, self %0 : $*SA<T>, value %1 : $T, init %4 : $@noescape @callee_guaranteed (@in T, @inout Int) -> (), set %6 : $@noescape @callee_guaranteed (@in T) -> ()
+  destroy_value %6 : $@noescape @callee_guaranteed (@in T) -> ()
+  destroy_value %4 : $@noescape @callee_guaranteed (@in T, @inout Int) -> ()
+  %r = tuple ()
+  return %r : $()
+}

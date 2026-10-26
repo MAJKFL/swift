@@ -4330,6 +4330,22 @@ protected:
 
   void visitStoreInst(StoreInst *storeInst);
 
+  void visitAssignInst(AssignInst *assign) {
+    assert(assign->getOwnershipQualifier() != AssignOwnershipQualifier::Reinit &&
+           "only class references are reinitialized");
+    bool isInit =
+        assign->getOwnershipQualifier() == AssignOwnershipQualifier::Init ||
+        assign->getDest()->getType().isTrivial(*pass.function);
+    rewriteStore(assign->getSrc(), assign->getDest(),
+                 isInit ? IsInitialization : IsNotInitialization);
+  }
+
+  void visitAssignOrInitInst(AssignOrInitInst *assignOrInit) {
+    assert(use->get() == assignOrInit->getSrc());
+    SILValue addr = addrMat.materializeAddress(use->get());
+    assignOrInit->setOperand(use->getOperandNumber(), addr);
+  }
+
   void emitExtract(SingleValueInstruction *extractInst);
 
   void visitSelectEnumInst(SelectEnumInst *sei) {
@@ -4672,8 +4688,6 @@ protected:
   NO_OPAQUE_OPERAND(AutoreleaseValue)
   NO_OPAQUE_OPERAND(BeginDeallocRef)
 
-  UNIMPLEMENTED_OPAQUE_OPERAND(Assign)
-  UNIMPLEMENTED_OPAQUE_OPERAND(AssignOrInit)
   UNIMPLEMENTED_OPAQUE_OPERAND(BorrowedFrom)
   UNIMPLEMENTED_OPAQUE_OPERAND(DereferenceAddrBorrow)
   UNIMPLEMENTED_OPAQUE_OPERAND(DereferenceBorrow)
