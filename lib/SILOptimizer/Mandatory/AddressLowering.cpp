@@ -3873,6 +3873,11 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::ExtractFunctionIsolation:
   // SILGen only emits this with an address operand.
   case BuiltinValueKind::TSanInoutAccess:
+  // SILGen rejects an address-only operand.
+  case BuiltinValueKind::BuildComplexEqualitySerialExecutorRef:
+  case BuiltinValueKind::BuildDefaultActorExecutorRef:
+  case BuiltinValueKind::BuildOrdinarySerialExecutorRef:
+  case BuiltinValueKind::BuildOrdinaryTaskExecutorRef:
   // Emitted only on an actor's self, and replaced by DefiniteInitialization.
   case BuiltinValueKind::FlowSensitiveDistributedSelfIsolation:
   case BuiltinValueKind::FlowSensitiveSelfIsolation:
@@ -3900,10 +3905,6 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::ZeroInitializer:
     return OpaqueBuiltinKind::ZeroInitializer;
 
-  case BuiltinValueKind::BuildComplexEqualitySerialExecutorRef:
-  case BuiltinValueKind::BuildDefaultActorExecutorRef:
-  case BuiltinValueKind::BuildOrdinarySerialExecutorRef:
-  case BuiltinValueKind::BuildOrdinaryTaskExecutorRef:
   case BuiltinValueKind::COWBufferForReading:
   case BuiltinValueKind::PrepareInitialization:
   case BuiltinValueKind::TaskRunInline:
@@ -4603,6 +4604,14 @@ protected:
   NO_OPAQUE_OPERAND(TupleAddrConstructor)
   NO_OPAQUE_OPERAND(Vector)
 
+  // SILGen rejects an address-only operand.
+  NO_OPAQUE_OPERAND(BeginCOWMutation)
+  NO_OPAQUE_OPERAND(InitExistentialRef)
+  NO_OPAQUE_OPERAND(RefToBridgeObject)
+  NO_OPAQUE_OPERAND(UnmanagedAutoreleaseValue)
+  NO_OPAQUE_OPERAND(UnmanagedReleaseValue)
+  NO_OPAQUE_OPERAND(UnmanagedRetainValue)
+
   // Created only for an Objective-C inner pointer result, or for a class
   // reference after this pass.
   NO_OPAQUE_OPERAND(AutoreleaseValue)
@@ -4610,7 +4619,6 @@ protected:
 
   UNIMPLEMENTED_OPAQUE_OPERAND(Assign)
   UNIMPLEMENTED_OPAQUE_OPERAND(AssignOrInit)
-  UNIMPLEMENTED_OPAQUE_OPERAND(BeginCOWMutation)
   UNIMPLEMENTED_OPAQUE_OPERAND(BorrowedFrom)
   UNIMPLEMENTED_OPAQUE_OPERAND(DeinitExistentialValue)
   UNIMPLEMENTED_OPAQUE_OPERAND(DereferenceAddrBorrow)
@@ -4623,9 +4631,7 @@ protected:
   UNIMPLEMENTED_OPAQUE_OPERAND(EndLifetime)
   UNIMPLEMENTED_OPAQUE_OPERAND(ExtractExecutor)
   UNIMPLEMENTED_OPAQUE_OPERAND(HopToExecutor)
-  UNIMPLEMENTED_OPAQUE_OPERAND(InitExistentialRef)
   UNIMPLEMENTED_OPAQUE_OPERAND(MergeIsolationRegion)
-  UNIMPLEMENTED_OPAQUE_OPERAND(RefToBridgeObject)
   UNIMPLEMENTED_OPAQUE_OPERAND(RefToRawPointer)
   UNIMPLEMENTED_OPAQUE_OPERAND(SelectEnumAddr)
   UNIMPLEMENTED_OPAQUE_OPERAND(StoreUnowned)
@@ -4633,9 +4639,6 @@ protected:
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedOwnership)
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedOwnershipConversion)
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedRefCast)
-  UNIMPLEMENTED_OPAQUE_OPERAND(UnmanagedAutoreleaseValue)
-  UNIMPLEMENTED_OPAQUE_OPERAND(UnmanagedReleaseValue)
-  UNIMPLEMENTED_OPAQUE_OPERAND(UnmanagedRetainValue)
   UNIMPLEMENTED_OPAQUE_OPERAND(UnownedCopyValue)
   UNIMPLEMENTED_OPAQUE_OPERAND(WeakCopyValue)
 
@@ -5604,11 +5607,13 @@ protected:
   REWRITTEN_BY_USE(TuplePackExtract)
   REWRITTEN_BY_USE(UncheckedEnumData)
 
+  // SILGen rejects an address-only result.
+  NO_OPAQUE_RESULT(BeginCOWMutation)
+  NO_OPAQUE_RESULT(BridgeObjectToRef)
+
   // Created only for a class reference, after this pass.
   NO_OPAQUE_RESULT(BeginDeallocRef)
 
-  UNIMPLEMENTED_OPAQUE_RESULT(BeginCOWMutation)
-  UNIMPLEMENTED_OPAQUE_RESULT(BridgeObjectToRef)
   UNIMPLEMENTED_OPAQUE_RESULT(DropDeinit)
   UNIMPLEMENTED_OPAQUE_RESULT(EndApply)
   UNIMPLEMENTED_OPAQUE_RESULT(EndCOWMutation)

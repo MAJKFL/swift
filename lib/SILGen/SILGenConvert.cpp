@@ -21,6 +21,7 @@
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/Types.h"
@@ -805,6 +806,13 @@ ManagedValue SILGenFunction::emitExistentialErasure(
   }
   case ExistentialRepresentation::Class: {
     assert(existentialTL.isLoadable());
+
+    // Only a COM generic is both class-bound and address-only.
+    if (!concreteTL.isLoadable()) {
+      SGM.diagnose(loc, diag::com_generic_class_existential, concreteFormalType,
+                   existentialTL.getLoweredType().getASTType());
+      return emitUndef(existentialTL.getLoweredType());
+    }
 
     ManagedValue sub = F(SGFContext());
     return B.createInitExistentialRef(loc, existentialTL.getLoweredType(),

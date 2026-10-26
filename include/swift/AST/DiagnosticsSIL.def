@@ -868,6 +868,10 @@ ERROR(builtin_get_function_isolation_bad_argument, none,
       "function type",
       ())
 
+ERROR(com_generic_class_existential, none,
+      "cannot convert %0 to %1 because %0 may hold a COM interface pointer",
+      (Type, Type))
+
 WARNING(semantic_function_improper_nesting, none, "'@_semantics' function calls non-'@_semantics' function with nested '@_semantics' calls", ())
 
 // SDK mismatch diagnostics

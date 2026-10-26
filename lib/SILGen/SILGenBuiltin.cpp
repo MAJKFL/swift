@@ -63,11 +63,24 @@ decomposeArguments(SILGenFunction &SGF, SILLocation loc,
   return std::nullopt;
 }
 
+/// Diagnose \p message if \p type is address-only.
+static bool diagnoseAddressOnly(SILGenFunction &SGF, SILLocation loc,
+                                SILType type, StringRef message) {
+  if (SGF.getTypeLowering(type).isLoadable())
+    return false;
+  SGF.SGM.diagnose(loc, diag::invalid_sil_builtin, message);
+  return true;
+}
+
 static ManagedValue emitBuiltinRetain(SILGenFunction &SGF,
                                       SILLocation loc,
                                       SubstitutionMap substitutions,
                                       ArrayRef<ManagedValue> args,
                                       SGFContext C) {
+  if (diagnoseAddressOnly(SGF, loc, args[0].getType(),
+                          "retain operand must be an object type"))
+    return ManagedValue::forObjectRValueWithoutOwnership(
+        SGF.emitEmptyTuple(loc));
   // The value was produced at +1; we can produce an unbalanced retain simply by
   // disabling the cleanup. But this would violate ownership semantics. Instead,
   // we must allow for the cleanup and emit a new unmanaged retain value.
@@ -81,6 +94,10 @@ static ManagedValue emitBuiltinRelease(SILGenFunction &SGF,
                                        SubstitutionMap substitutions,
                                        ArrayRef<ManagedValue> args,
                                        SGFContext C) {
+  if (diagnoseAddressOnly(SGF, loc, args[0].getType(),
+                          "release operand must be an object type"))
+    return ManagedValue::forObjectRValueWithoutOwnership(
+        SGF.emitEmptyTuple(loc));
   // The value was produced at +1, so to produce an unbalanced
   // release we need to leave the cleanup intact and then do a *second*
   // release.
@@ -94,6 +111,10 @@ static ManagedValue emitBuiltinAutorelease(SILGenFunction &SGF,
                                            SubstitutionMap substitutions,
                                            ArrayRef<ManagedValue> args,
                                            SGFContext C) {
+  if (diagnoseAddressOnly(SGF, loc, args[0].getType(),
+                          "autorelease operand must be an object type"))
+    return ManagedValue::forObjectRValueWithoutOwnership(
+        SGF.emitEmptyTuple(loc));
   SGF.B.createUnmanagedAutoreleaseValue(loc, args[0].getValue(),
                                         SGF.B.getDefaultAtomicity());
   return ManagedValue::forObjectRValueWithoutOwnership(SGF.emitEmptyTuple(loc));
@@ -1020,8 +1041,9 @@ static ManagedValue emitBuiltinCastToBridgeObject(SILGenFunction &SGF,
 
   // Bail if the source type is not a class reference of some kind.
   auto sourceType = subs.getReplacementTypes()[0];
-  if (!sourceType->mayHaveSuperclass() &&
-      !sourceType->isClassExistentialType()) {
+  if ((!sourceType->mayHaveSuperclass() &&
+       !sourceType->isClassExistentialType()) ||
+      !SGF.getTypeLowering(args[0].getType()).isLoadable()) {
     SGF.SGM.diagnose(loc, diag::invalid_sil_builtin,
                      "castToBridgeObject source must be a class");
     return SGF.emitUndef(objPointerType);
@@ -1056,7 +1078,8 @@ static ManagedValue emitBuiltinCastReferenceFromBridgeObject(
   SILType destType = SGF.getLoweredType(destTy);
   
   // Bail if the source type is not a class reference of some kind.
-  if (!destTy->isBridgeableObjectType() || !destType.isObject()) {
+  if (!destTy->isBridgeableObjectType() ||
+      !SGF.getTypeLowering(destType).isLoadable()) {
     SGF.SGM.diagnose(loc, diag::invalid_sil_builtin,
                  "castReferenceFromBridgeObject dest must be an object type");
     // Recover by propagating an undef result.
@@ -1167,6 +1190,10 @@ emitBuiltinBeginCOWMutation(SILGenFunction &SGF,
   assert(args.size() == 1 && "isUnique_native should have one arg.");
 
   SILValue refAddr = args[0].getValue();
+  if (diagnoseAddressOnly(SGF, loc, refAddr->getType(),
+                          "beginCOWMutation operand must be an object type"))
+    return SGF.emitUndef(
+        SILType::getBuiltinIntegerType(1, SGF.getASTContext()));
   auto *ref = SGF.B.createLoad(loc, refAddr, LoadOwnershipQualifier::Take);
   BeginCOWMutationInst *beginCOW = SGF.B.createBeginCOWMutation(loc, ref, /*isNative*/ false);
   SGF.B.createStore(loc, beginCOW->getBufferResult(), refAddr, StoreOwnershipQualifier::Init);
@@ -1186,6 +1213,10 @@ emitBuiltinBeginCOWMutation_native(SILGenFunction &SGF,
   assert(args.size() == 1 && "isUnique_native should have one arg.");
 
   SILValue refAddr = args[0].getValue();
+  if (diagnoseAddressOnly(SGF, loc, refAddr->getType(),
+                          "beginCOWMutation operand must be an object type"))
+    return SGF.emitUndef(
+        SILType::getBuiltinIntegerType(1, SGF.getASTContext()));
   auto *ref = SGF.B.createLoad(loc, refAddr, LoadOwnershipQualifier::Take);
   BeginCOWMutationInst *beginCOW = SGF.B.createBeginCOWMutation(loc, ref, /*isNative*/ true);
   SGF.B.createStore(loc, beginCOW->getBufferResult(), refAddr, StoreOwnershipQualifier::Init);
@@ -2170,14 +2201,19 @@ static ManagedValue emitBuildExecutorRef(SILGenFunction &SGF, SILLocation loc,
                                          BuiltinValueKind builtin) {
   ASTContext &ctx = SGF.getASTContext();
   auto builtinID = ctx.getIdentifier(getBuiltinName(builtin));
+  auto executorType = SILType::getPrimitiveObjectType(ctx.TheExecutorType);
+
+  if (!args.empty() &&
+      diagnoseAddressOnly(SGF, loc, args[0].getType(),
+                          "executor operand must be an object type"))
+    return SGF.emitUndef(executorType);
 
   SmallVector<SILValue,1> argValues;
   if (!args.empty())
     argValues.push_back(args[0].borrow(SGF, loc).getValue());
 
-  auto builtinApply = SGF.B.createBuiltin(loc, builtinID,
-      SILType::getPrimitiveObjectType(ctx.TheExecutorType),
-      subs, argValues);
+  auto builtinApply =
+      SGF.B.createBuiltin(loc, builtinID, executorType, subs, argValues);
   return ManagedValue::forObjectRValueWithoutOwnership(builtinApply);
 }
 static ManagedValue emitBuiltinBuildOrdinaryTaskExecutorRef(
