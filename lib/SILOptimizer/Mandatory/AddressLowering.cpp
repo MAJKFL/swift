@@ -264,6 +264,10 @@ visitCallResults(FullApplySite apply,
 static bool isPseudoCallResult(SILValue value) {
   if (auto *apply = dyn_cast<ApplyInst>(value))
     return ApplySite(apply).getSubstCalleeConv().getNumDirectSILResults() > 1;
+  if (auto *endApply = dyn_cast<EndApplyInst>(value))
+    return ApplySite(endApply->getBeginApply())
+               .getSubstCalleeConv()
+               .getNumDirectSILResults() > 1;
 
   auto *bbArg = dyn_cast<SILPhiArgument>(value);
   if (!bbArg)
@@ -2567,9 +2571,12 @@ public:
         loweredCalleeConv(getLoweredCallConv(oldCall)) {}
 
   void convertApplyWithIndirectResults();
-  void convertBeginApplyWithOpaqueYield();
+  void convertBeginApply();
 
 protected:
+  void rewriteEndApplies(BeginApplyInst *newCall,
+                         ArrayRef<AllocStackInst *> resultTemps);
+
   SILBasicBlock::iterator getCallResultInsertionPoint() {
     if (isa<ApplyInst>(apply) || isa<BeginApplyInst>(apply))
       return std::next(SILBasicBlock::iterator(apply.getInstruction()));
@@ -2910,7 +2917,7 @@ emitEndBorrowsAtEnclosingGuaranteedBoundary(SILValue lifetimeToEnd,
                                             SILValue enclosingValue,
                                             AddressLoweringState &pass);
 
-void ApplyRewriter::convertBeginApplyWithOpaqueYield() {
+void ApplyRewriter::convertBeginApply() {
   // Avoid revisiting this apply.
   bool erased = pass.indirectApplies.erase(apply);
   assert(erased && "all begin_applies should be rewritten at the same time");
@@ -2918,15 +2925,27 @@ void ApplyRewriter::convertBeginApplyWithOpaqueYield() {
 
   auto *origCall = cast<BeginApplyInst>(apply.getInstruction());
   SmallVector<SILValue, 4> opValues;
+  SmallVector<SILLocation, 4> argLocs;
+  auto origArgLocs = ApplySite(origCall).getArgumentLocs();
 
+  // The coroutine initializes each indirect result by end_apply, which comes
+  // after any storage allocated for the result value.
+  SmallVector<AllocStackInst *, 2> resultTemps;
+  auto typeCtx = pass.function->getTypeExpansionContext();
+  for (SILResultInfo resultInfo : loweredCalleeConv.getIndirectSILResults()) {
+    auto *temp = argBuilder.createAllocStack(
+        callLoc, loweredCalleeConv.getSILType(resultInfo, typeCtx), {},
+        DoesNotHaveDynamicLifetime, IsNotLexical, IsNotFromVarDecl,
+        DoesNotUseMoveableValueDebugInfo, /*skipVarDeclAssert=*/true);
+    resultTemps.push_back(temp);
+    opValues.push_back(temp);
+    argLocs.push_back(callLoc);
+  }
   for (auto &oper : origCall->getArgumentOperands()) {
     opValues.push_back(oper.get());
   }
-
-  // begin_apply yield-rewrite is a strict argument-preserving rewrite: we
-  // copy every operand through unchanged and only the result conventions
-  // change. The original per-argument SILLocations remain positionally
-  // valid 1:1 with `opValues`; just pass them through.
+  if (origArgLocs)
+    argLocs.append(origArgLocs->begin(), origArgLocs->end());
 
   // Recreate the begin_apply so that the instruction results have the right
   // ownership kind as per the lowered addresses convention.
@@ -2934,7 +2953,8 @@ void ApplyRewriter::convertBeginApplyWithOpaqueYield() {
       callLoc, apply.getCallee(), apply.getSubstitutionMap(), opValues,
       origCall->getApplyOptions(), origCall->getSpecializationInfo(),
       /*isolationCrossing=*/std::nullopt,
-      ApplySite(origCall).getArgumentLocs());
+      origArgLocs ? std::optional<ArrayRef<SILLocation>>(argLocs)
+                  : std::nullopt);
   this->apply = FullApplySite(newCall);
 
   // Replace uses of orig begin_apply with the new begin_apply
@@ -3000,6 +3020,86 @@ void ApplyRewriter::convertBeginApplyWithOpaqueYield() {
           callLoc, &newResult, LoadOwnershipQualifier::Take);
       oldResult.replaceAllUsesWith(load);
     }
+  }
+  if (!resultTemps.empty())
+    rewriteEndApplies(newCall, resultTemps);
+
+  if (llvm::none_of(origCall->getResults(), [&](SILValue result) {
+        return pass.valueStorageMap.contains(result);
+      }))
+    pass.deleter.forceDelete(origCall);
+}
+
+/// Replace each end_apply of \p newCall with one producing only the direct
+/// results, and move each indirect result out of its temporary.
+void ApplyRewriter::rewriteEndApplies(BeginApplyInst *newCall,
+                                      ArrayRef<AllocStackInst *> resultTemps) {
+  auto typeCtx = pass.function->getTypeExpansionContext();
+  SmallVector<SILInstruction *, 2> tokenEnds;
+  for (auto *use : newCall->getTokenResult()->getUses())
+    tokenEnds.push_back(use->getUser());
+
+  for (auto *tokenEnd : tokenEnds) {
+    auto loc = tokenEnd->getLoc();
+    auto afterBuilder = pass.getBuilder(std::next(tokenEnd->getIterator()));
+    auto *oldEnd = dyn_cast<EndApplyInst>(tokenEnd);
+    if (!oldEnd) {
+      // abort_apply or end_borrow: the results were never initialized.
+      for (auto *temp : llvm::reverse(resultTemps))
+        afterBuilder.createDeallocStack(loc, temp);
+      continue;
+    }
+    auto *newEnd =
+        pass.getBuilder(oldEnd->getIterator())
+            .createEndApply(loc, newCall->getTokenResult(),
+                            loweredCalleeConv.getSILResultType(typeCtx));
+    DestructureTupleInst *oldDestructure = nullptr;
+    if (isPseudoCallResult(oldEnd)) {
+      if (auto *use = oldEnd->getSingleUse())
+        oldDestructure = cast<DestructureTupleInst>(use->getUser());
+    }
+    DestructureTupleInst *newDestructure = nullptr;
+    if (loweredCalleeConv.getNumDirectSILResults() > 1)
+      newDestructure = afterBuilder.createDestructureTuple(loc, newEnd);
+
+    unsigned resultIdx = 0, tempIdx = 0, directIdx = 0;
+    for (SILResultInfo resultInfo : opaqueCalleeConv.getDirectSILResults()) {
+      SILValue oldResult;
+      if (oldDestructure)
+        oldResult = oldDestructure->getResult(resultIdx);
+      else if (!isPseudoCallResult(oldEnd))
+        oldResult = oldEnd;
+      ++resultIdx;
+      if (!loweredCalleeConv.isSILIndirect(resultInfo)) {
+        SILValue newResult =
+            newDestructure ? newDestructure->getResult(directIdx) : newEnd;
+        ++directIdx;
+        if (oldResult)
+          oldResult->replaceAllUsesWith(newResult);
+        continue;
+      }
+      AllocStackInst *temp = resultTemps[tempIdx++];
+      if (!oldResult)
+        continue;
+      if (oldResult->getType().isAddressOnly(*pass.function)) {
+        AddressMaterialization addrMat(pass, oldResult, afterBuilder);
+        SILValue destAddr = addrMat.materializeAddress(oldResult);
+        afterBuilder.createCopyAddr(loc, temp, destAddr, IsTake,
+                                    IsInitialization);
+        pass.valueStorageMap.getStorage(oldResult).markRewritten();
+      } else if (!oldResult->use_empty()) {
+        oldResult->replaceAllUsesWith(afterBuilder.createTrivialLoadOr(
+            loc, temp, LoadOwnershipQualifier::Take));
+      }
+    }
+    for (auto *temp : llvm::reverse(resultTemps))
+      afterBuilder.createDeallocStack(loc, temp);
+
+    // deleteRewrittenInstructions deletes an old end_apply with opaque results.
+    if (oldDestructure && isInstructionTriviallyDead(oldDestructure))
+      pass.deleter.forceDelete(oldDestructure);
+    if (oldEnd->use_empty() && !pass.valueStorageMap.contains(oldEnd))
+      pass.deleter.forceDelete(oldEnd);
   }
 }
 
@@ -5484,7 +5584,17 @@ protected:
 
   void visitBeginApplyInst(BeginApplyInst *bai) {
     CallArgRewriter(bai, pass).rewriteArguments();
-    ApplyRewriter(bai, pass).convertBeginApplyWithOpaqueYield();
+    ApplyRewriter(bai, pass).convertBeginApply();
+  }
+
+  void visitEndApplyInst(EndApplyInst *endApply) {
+    rewriteBeginApplyResults(endApply);
+  }
+
+  void rewriteBeginApplyResults(EndApplyInst *endApply) {
+    BeginApplyInst *beginApply = endApply->getBeginApply();
+    CallArgRewriter(beginApply, pass).rewriteArguments();
+    ApplyRewriter(beginApply, pass).convertBeginApply();
   }
 
   void visitBuiltinInst(BuiltinInst *bi) {
@@ -5602,6 +5712,10 @@ protected:
     SILValue srcVal = destructure->getOperand();
     assert(isPseudoCallResult(srcVal) && "destructure use should be rewritten");
 
+    if (auto *endApply = dyn_cast<EndApplyInst>(srcVal)) {
+      rewriteBeginApplyResults(endApply);
+      return;
+    }
     FullApplySite apply;
     if (auto *applyInst = dyn_cast<ApplyInst>(srcVal)) {
       apply = FullApplySite::isa(applyInst);
@@ -5887,8 +6001,6 @@ protected:
   // Created only for a class reference, after this pass.
   NO_OPAQUE_RESULT(BeginDeallocRef)
 
-  UNIMPLEMENTED_OPAQUE_RESULT(EndApply)
-
 #undef NO_OPAQUE_RESULT
 #undef REWRITTEN_BY_USE
 #undef UNIMPLEMENTED_OPAQUE_RESULT
@@ -5929,10 +6041,11 @@ static void rewriteIndirectApply(ApplySite anyApply,
     break;
   }
   case FullApplySiteKind::BeginApplyInst: {
-    if (!apply.getSubstCalleeType()->hasIndirectFormalYields()) {
+    if (!apply.getSubstCalleeType()->hasIndirectFormalYields() &&
+        !apply.getSubstCalleeType()->hasIndirectFormalResults()) {
       return;
     }
-    ApplyRewriter(apply, pass).convertBeginApplyWithOpaqueYield();
+    ApplyRewriter(apply, pass).convertBeginApply();
     break;
   }
   }
@@ -6210,8 +6323,8 @@ static void deleteRewrittenInstructions(AddressLoweringState &pass) {
 
     if (auto *destructure = dyn_cast<DestructureTupleInst>(deadInst)) {
       auto tupleVal = destructure->getOperand();
-      if (auto *applyInst = dyn_cast<ApplyInst>(tupleVal)) {
-        deadInst = applyInst;
+      if (isa<ApplyInst>(tupleVal) || isa<EndApplyInst>(tupleVal)) {
+        deadInst = tupleVal->getDefiningInstruction();
       }
     }
     LLVM_DEBUG(llvm::dbgs() << "DEAD "; deadInst->dump());

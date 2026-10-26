@@ -1,0 +1,113 @@
+// RUN: %target-sil-opt -sil-print-types -address-lowering -enable-sil-opaque-values -module-name Swift -sil-verify-all %s | %FileCheck %s
+
+import Builtin
+
+sil_stage raw
+
+typealias Int = Builtin.Int64
+
+sil @coroResult : $@yield_once @convention(thin) <U> () -> (@yields Int, @out U)
+sil @coroResultAndYield : $@yield_once @convention(thin) <U> () -> (@yields @in_guaranteed U, @out U)
+sil @coroResults : $@yield_once @convention(thin) <U> () -> (@yields Int, @out U, Int)
+sil @coroLoadableResult : $@yield_once @convention(thin) <U> () -> (@yields Int, @out Int)
+
+// CHECK-LABEL: sil [ossa] @end_apply_opaque_result : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK:         [[R:%.*]] = alloc_stack $T
+// CHECK-NEXT:    ({{%.*}}, [[TOK:%.*]]) = begin_apply %{{.*}}<T>([[R]])
+// CHECK-NEXT:    end_apply [[TOK]] as $()
+// CHECK-NEXT:    copy_addr [take] [[R]] to [init] %0 : $*T
+// CHECK:         dealloc_stack [[R]] : $*T
+// CHECK-LABEL: } // end sil function 'end_apply_opaque_result'
+sil [ossa] @end_apply_opaque_result : $@convention(thin) <T> () -> @out T {
+bb0:
+  %0 = function_ref @coroResult : $@yield_once @convention(thin) <U> () -> (@yields Int, @out U)
+  (%1, %2) = begin_apply %0<T>() : $@yield_once @convention(thin) <U> () -> (@yields Int, @out U)
+  %3 = end_apply %2 as $T
+  return %3 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @end_apply_opaque_result_and_yield : $@convention(thin) <T> () -> @out T {
+// CHECK:         [[C:%.*]] = alloc_stack $T
+// CHECK:         [[R:%.*]] = alloc_stack $T
+// CHECK-NEXT:    ([[Y:%.*]], [[TOK:%.*]]) = begin_apply %{{.*}}<T>([[R]])
+// CHECK-NEXT:    copy_addr [[Y]] to [init] [[C]] : $*T
+// CHECK-NEXT:    end_apply [[TOK]] as $()
+// CHECK-NEXT:    copy_addr [take] [[R]] to [init] %0 : $*T
+// CHECK-NEXT:    dealloc_stack [[R]] : $*T
+// CHECK-NEXT:    destroy_addr [[C]] : $*T
+// CHECK-LABEL: } // end sil function 'end_apply_opaque_result_and_yield'
+sil [ossa] @end_apply_opaque_result_and_yield : $@convention(thin) <T> () -> @out T {
+bb0:
+  %0 = function_ref @coroResultAndYield : $@yield_once @convention(thin) <U> () -> (@yields @in_guaranteed U, @out U)
+  (%1, %2) = begin_apply %0<T>() : $@yield_once @convention(thin) <U> () -> (@yields @in_guaranteed U, @out U)
+  %3 = copy_value %1 : $T
+  %4 = end_apply %2 as $T
+  destroy_value %3 : $T
+  return %4 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @end_apply_results : $@convention(thin) <T> () -> (@out T, Builtin.Int64) {
+// CHECK:       bb0(%0 : $*T):
+// CHECK:         [[R:%.*]] = alloc_stack $T
+// CHECK-NEXT:    ({{%.*}}, [[TOK:%.*]]) = begin_apply %{{.*}}<T>([[R]])
+// CHECK-NEXT:    [[I:%.*]] = end_apply [[TOK]] as $Builtin.Int64
+// CHECK-NEXT:    copy_addr [take] [[R]] to [init] %0 : $*T
+// CHECK-NEXT:    dealloc_stack [[R]] : $*T
+// CHECK-NEXT:    return [[I]] : $Builtin.Int64
+// CHECK-LABEL: } // end sil function 'end_apply_results'
+sil [ossa] @end_apply_results : $@convention(thin) <T> () -> (@out T, Int) {
+bb0:
+  %0 = function_ref @coroResults : $@yield_once @convention(thin) <U> () -> (@yields Int, @out U, Int)
+  (%1, %2) = begin_apply %0<T>() : $@yield_once @convention(thin) <U> () -> (@yields Int, @out U, Int)
+  %3 = end_apply %2 as $(T, Int)
+  (%4, %5) = destructure_tuple %3 : $(T, Int)
+  %6 = tuple (%4 : $T, %5 : $Int)
+  return %6 : $(T, Int)
+}
+
+// CHECK-LABEL: sil [ossa] @end_apply_abort_apply : $@convention(thin) <T> (Builtin.Int1) -> () {
+// CHECK:         [[R:%.*]] = alloc_stack $T
+// CHECK-NEXT:    ({{%.*}}, [[TOK:%.*]]) = begin_apply %{{.*}}<T>([[R]])
+// CHECK:       bb1:
+// CHECK:         end_apply [[TOK]] as $Builtin.Int64
+// CHECK-NEXT:    copy_addr [take] [[R]] to [init] [[A:%.*]] : $*T
+// CHECK-NEXT:    destroy_addr [[A]] : $*T
+// CHECK:         dealloc_stack [[R]] : $*T
+// CHECK:       bb2:
+// CHECK-NEXT:    abort_apply [[TOK]]
+// CHECK-NEXT:    dealloc_stack [[R]] : $*T
+// CHECK-LABEL: } // end sil function 'end_apply_abort_apply'
+sil [ossa] @end_apply_abort_apply : $@convention(thin) <T> (Builtin.Int1) -> () {
+bb0(%0 : $Builtin.Int1):
+  %1 = function_ref @coroResults : $@yield_once @convention(thin) <U> () -> (@yields Int, @out U, Int)
+  (%2, %3) = begin_apply %1<T>() : $@yield_once @convention(thin) <U> () -> (@yields Int, @out U, Int)
+  cond_br %0, bb1, bb2
+bb1:
+  %4 = end_apply %3 as $(T, Int)
+  (%5, %6) = destructure_tuple %4 : $(T, Int)
+  destroy_value %5 : $T
+  br bb3
+bb2:
+  abort_apply %3
+  br bb3
+bb3:
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @end_apply_loadable_indirect_result : $@convention(thin) <T> () -> Builtin.Int64 {
+// CHECK:         [[R:%.*]] = alloc_stack $Builtin.Int64
+// CHECK-NEXT:    ({{%.*}}, [[TOK:%.*]]) = begin_apply %{{.*}}<T>([[R]])
+// CHECK-NEXT:    end_apply [[TOK]] as $()
+// CHECK-NEXT:    [[L:%.*]] = load [trivial] [[R]] : $*Builtin.Int64
+// CHECK-NEXT:    dealloc_stack [[R]] : $*Builtin.Int64
+// CHECK-NEXT:    return [[L]] : $Builtin.Int64
+// CHECK-LABEL: } // end sil function 'end_apply_loadable_indirect_result'
+sil [ossa] @end_apply_loadable_indirect_result : $@convention(thin) <T> () -> Int {
+bb0:
+  %0 = function_ref @coroLoadableResult : $@yield_once @convention(thin) <U> () -> (@yields Int, @out Int)
+  (%1, %2) = begin_apply %0<T>() : $@yield_once @convention(thin) <U> () -> (@yields Int, @out Int)
+  %3 = end_apply %2 as $Int
+  return %3 : $Int
+}
