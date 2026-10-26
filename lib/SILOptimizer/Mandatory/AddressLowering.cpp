@@ -4697,8 +4697,12 @@ static void emitEndBorrows(SILValue value, AddressLoweringState &pass) {
   SmallVector<SILBasicBlock *, 4> discoveredBlocks;
   SSAPrunedLiveness liveness(value->getFunction(), &discoveredBlocks);
   liveness.initializeDef(value);
+  SmallVector<ReturnInst *, 1> returns;
   for (auto *use : usePoints) {
-    assert(!use->isLifetimeEnding() || isa<EndBorrowInst>(use->getUser()));
+    if (auto *returnInst = dyn_cast<ReturnInst>(use->getUser()))
+      returns.push_back(returnInst);
+    else
+      assert(!use->isLifetimeEnding() || isa<EndBorrowInst>(use->getUser()));
     liveness.updateForUse(use->getUser(), /*lifetimeEnding*/ false);
   }
   PrunedLivenessBoundary guaranteedBoundary;
@@ -4707,6 +4711,15 @@ static void emitEndBorrows(SILValue value, AddressLoweringState &pass) {
       [&](SILBasicBlock::iterator insertPt) {
         pass.getBuilder(insertPt).createEndBorrow(pass.genLoc(), value);
       });
+  // A borrow accessor returning a field of its opaque self.
+  for (TermInst *returnInst : returns) {
+    TermInst *returnBorrow =
+        pass.getBuilder(returnInst->getIterator())
+            .createReturnBorrow(returnInst->getLoc(),
+                                returnInst->getOperand(0), {value});
+    llvm::replace(pass.exitingInsts, returnInst, returnBorrow);
+    pass.deleter.forceDelete(returnInst);
+  }
 }
 
 /// Emit end_borrows at the lifetime ends of the guaranteed value which

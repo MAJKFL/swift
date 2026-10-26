@@ -3239,6 +3239,18 @@ bb_exit:
   return %r : $()
 }
 
+// CHECK-LABEL: sil [ossa] @test_return_borrow_1_loadable_field : {{.*}} {
+// CHECK:       bb0(%0 : $*BigRef<T>):
+// CHECK-NEXT:    [[ADDR:%.*]] = struct_element_addr %0 : $*BigRef<T>, #BigRef.ref
+// CHECK-NEXT:    [[REF:%.*]] = load_borrow [[ADDR]] : $*Klass
+// CHECK-NEXT:    return_borrow [[REF]] : $Klass from_scopes ([[REF]] : $Klass)
+// CHECK-LABEL: } // end sil function 'test_return_borrow_1_loadable_field'
+sil [ossa] @test_return_borrow_1_loadable_field : $@convention(method) <T> (@in_guaranteed BigRef<T>) -> @guaranteed Klass {
+bb0(%0 : @guaranteed $BigRef<T>):
+  %1 = struct_extract %0 : $BigRef<T>, #BigRef.ref
+  return %1 : $Klass
+}
+
 // CHECK-LABEL: sil hidden [ossa] @test_store_1 : {{.*}} {
 // CHECK:         [[MAYBE_ADDR:%[^,]+]] = alloc_stack $Optional<Self>
 // CHECK:         [[LOAD_ADDR:%[^,]+]] = alloc_stack $Self
