@@ -3870,6 +3870,9 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::ExtractFunctionIsolation:
   // SILGen only emits this with an address operand.
   case BuiltinValueKind::TSanInoutAccess:
+  // Emitted only on an actor's self, and replaced by DefiniteInitialization.
+  case BuiltinValueKind::FlowSensitiveDistributedSelfIsolation:
+  case BuiltinValueKind::FlowSensitiveSelfIsolation:
     return OpaqueBuiltinKind::NeverOpaque;
 
 #define BUILTIN(Id, Name, Attrs)
@@ -3900,8 +3903,6 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::BuildOrdinaryTaskExecutorRef:
   case BuiltinValueKind::COWBufferForReading:
   case BuiltinValueKind::ExtractElement:
-  case BuiltinValueKind::FlowSensitiveDistributedSelfIsolation:
-  case BuiltinValueKind::FlowSensitiveSelfIsolation:
   case BuiltinValueKind::InsertElement:
   case BuiltinValueKind::PrepareInitialization:
   case BuiltinValueKind::Select:
@@ -4602,11 +4603,14 @@ protected:
   NO_OPAQUE_OPERAND(TupleAddrConstructor)
   NO_OPAQUE_OPERAND(Vector)
 
+  // Created only for an Objective-C inner pointer result, or for a class
+  // reference after this pass.
+  NO_OPAQUE_OPERAND(AutoreleaseValue)
+  NO_OPAQUE_OPERAND(BeginDeallocRef)
+
   UNIMPLEMENTED_OPAQUE_OPERAND(Assign)
   UNIMPLEMENTED_OPAQUE_OPERAND(AssignOrInit)
-  UNIMPLEMENTED_OPAQUE_OPERAND(AutoreleaseValue)
   UNIMPLEMENTED_OPAQUE_OPERAND(BeginCOWMutation)
-  UNIMPLEMENTED_OPAQUE_OPERAND(BeginDeallocRef)
   UNIMPLEMENTED_OPAQUE_OPERAND(BorrowedFrom)
   UNIMPLEMENTED_OPAQUE_OPERAND(DeinitExistentialValue)
   UNIMPLEMENTED_OPAQUE_OPERAND(DereferenceAddrBorrow)
@@ -5600,8 +5604,10 @@ protected:
   REWRITTEN_BY_USE(TuplePackExtract)
   REWRITTEN_BY_USE(UncheckedEnumData)
 
+  // Created only for a class reference, after this pass.
+  NO_OPAQUE_RESULT(BeginDeallocRef)
+
   UNIMPLEMENTED_OPAQUE_RESULT(BeginCOWMutation)
-  UNIMPLEMENTED_OPAQUE_RESULT(BeginDeallocRef)
   UNIMPLEMENTED_OPAQUE_RESULT(BridgeObjectToRef)
   UNIMPLEMENTED_OPAQUE_RESULT(DropDeinit)
   UNIMPLEMENTED_OPAQUE_RESULT(EndApply)
