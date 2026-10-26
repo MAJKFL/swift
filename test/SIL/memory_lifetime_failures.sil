@@ -709,6 +709,31 @@ bb0(%0 : $*Optional<String>):
   return %r : $() 
 }
 
+// CHECK: SIL memory lifetime failure in @indirect_result_after_abort_apply: memory is not initialized, but should be
+sil [ossa] @indirect_result_after_abort_apply : $@convention(thin) <T> () -> @out T {
+bb0(%0 : $*T):
+  %1 = alloc_stack $T
+  (%2, %3) = begin_apply undef<T>(%1) : $@yield_once @convention(thin) <U> () -> (@yields Builtin.Int64, @out U)
+  abort_apply %3
+  copy_addr [take] %1 to [init] %0 : $*T
+  dealloc_stack %1 : $*T
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK: SIL memory lifetime failure in @indirect_result_initialized_before_begin_apply: memory is initialized, but shouldn't be
+sil [ossa] @indirect_result_initialized_before_begin_apply : $@convention(thin) <T> (@in_guaranteed T) -> @out T {
+bb0(%0 : $*T, %1 : $*T):
+  %2 = alloc_stack $T
+  copy_addr %1 to [init] %2 : $*T
+  (%3, %4) = begin_apply undef<T>(%2) : $@yield_once @convention(thin) <U> () -> (@yields Builtin.Int64, @out U)
+  end_apply %4 as $()
+  copy_addr [take] %2 to [init] %0 : $*T
+  dealloc_stack %2 : $*T
+  %r = tuple ()
+  return %r : $()
+}
+
 // CHECK: SIL memory lifetime failure in @begin_apply_in_no_destroy: memory is initialized, but shouldn't be
 sil [ossa] @begin_apply_in_no_destroy : $@convention(thin) () -> () {
 entry:

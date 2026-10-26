@@ -757,6 +757,27 @@ bb3:
   return %14 : $()
 }
 
+sil [ossa] @end_apply_initializes_indirect_result : $@convention(thin) <T> () -> @out T {
+bb0(%0 : $*T):
+  %1 = alloc_stack $T
+  (%2, %3) = begin_apply undef<T>(%1) : $@yield_once @convention(thin) <U> () -> (@yields Builtin.Int64, @out U)
+  %4 = end_apply %3 as $()
+  copy_addr [take] %1 to [init] %0 : $*T
+  dealloc_stack %1 : $*T
+  %r = tuple ()
+  return %r : $()
+}
+
+sil [ossa] @abort_apply_leaves_indirect_result_uninitialized : $@convention(thin) <T> () -> () {
+bb0:
+  %1 = alloc_stack $T
+  (%2, %3) = begin_apply undef<T>(%1) : $@yield_once @convention(thin) <U> () -> (@yields Builtin.Int64, @out U)
+  abort_apply %3
+  dealloc_stack %1 : $*T
+  %r = tuple ()
+  return %r : $()
+}
+
 sil [ossa] @begin_apply_in_destroy : $@convention(thin) () -> () {
 entry:
   (%instance, %token) = begin_apply undef<Inner>() : $@yield_once @convention(thin) <U> () -> @yields @in U

@@ -601,6 +601,10 @@ void MemoryLifetimeVerifier::initDataflowInBlock(SILBasicBlock *block,
             killBits(state, yieldedValues[index]);
           }
         }
+        if (isa<EndApplyInst>(&I)) {
+          for (SILValue result : FullApplySite(BAI).getIndirectSILResults())
+            genBits(state, result);
+        }
         break;
       }
       case SILInstructionKind::YieldInst: {
@@ -973,6 +977,12 @@ void MemoryLifetimeVerifier::checkBlock(SILBasicBlock *block, Bits &bits) {
                                &I);
             }
             locations.clearBits(bits, yieldedValues[index]);
+          }
+        }
+        if (isa<EndApplyInst>(&I)) {
+          for (SILValue result : FullApplySite(BAI).getIndirectSILResults()) {
+            requireBitsClear(bits & nonTrivialLocations, result, &I);
+            locations.setBits(bits, result);
           }
         }
         break;
