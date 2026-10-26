@@ -3251,6 +3251,29 @@ bb0(%0 : @guaranteed $BigRef<T>):
   return %1 : $Klass
 }
 
+// CHECK-LABEL: sil [ossa] @test_return_borrow_2_phi : {{.*}} {
+// CHECK:         [[LEFT:%.*]] = load_borrow
+// CHECK-NEXT:    br bb3([[LEFT]] : $Klass)
+// CHECK:         [[RIGHT:%.*]] = load_borrow
+// CHECK-NEXT:    br bb3([[RIGHT]] : $Klass)
+// CHECK:       bb3([[PHI:%.*]] : @reborrow $Klass):
+// CHECK-NEXT:    [[BORROW:%.*]] = borrowed [[PHI]] : $Klass from ()
+// CHECK-NEXT:    return_borrow [[BORROW]] : $Klass from_scopes ([[BORROW]] : $Klass)
+// CHECK-LABEL: } // end sil function 'test_return_borrow_2_phi'
+sil [ossa] @test_return_borrow_2_phi : $@convention(method) <T> (@in_guaranteed BigRef<T>, @in_guaranteed BigRef<T>) -> @guaranteed Klass {
+bb0(%0 : @guaranteed $BigRef<T>, %1 : @guaranteed $BigRef<T>):
+  cond_br undef, bb1, bb2
+bb1:
+  %2 = struct_extract %0 : $BigRef<T>, #BigRef.ref
+  br bb3(%2 : $Klass)
+bb2:
+  %3 = struct_extract %1 : $BigRef<T>, #BigRef.ref
+  br bb3(%3 : $Klass)
+bb3(%4 : @guaranteed $Klass):
+  %5 = borrowed %4 : $Klass from (%1 : $BigRef<T>, %0 : $BigRef<T>)
+  return %5 : $Klass
+}
+
 // CHECK-LABEL: sil hidden [ossa] @test_store_1 : {{.*}} {
 // CHECK:         [[MAYBE_ADDR:%[^,]+]] = alloc_stack $Optional<Self>
 // CHECK:         [[LOAD_ADDR:%[^,]+]] = alloc_stack $Self

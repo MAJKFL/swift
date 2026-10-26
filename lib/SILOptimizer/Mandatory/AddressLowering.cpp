@@ -159,6 +159,7 @@
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/BasicBlockOptUtils.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
+#include "swift/SILOptimizer/Utils/OwnershipOptUtils.h"
 #include "swift/SILOptimizer/Utils/InstructionDeleter.h"
 #include "swift/SILOptimizer/Utils/StackNesting.h"
 #include "llvm/ADT/DenseMap.h"
@@ -588,6 +589,10 @@ struct AddressLoweringState {
 
   // Scratch operands of unchecked_borrow_enum_data_addr.
   SmallVector<AllocStackInst *, 4> enumScratchAllocs;
+
+  // Guaranteed phis with an opaque enclosing value. Their incoming values are
+  // loaded from opaque storage, so each becomes a reborrow.
+  SmallSetVector<SILPhiArgument *, 4> guaranteedPhis;
 
   SILLoopAnalysis *SLA;
 
@@ -4433,6 +4438,11 @@ protected:
   // DefRewriter rewrites the opaque result, reading every operand's storage.
   void visitSelectEnumAddrInst(SelectEnumAddrInst *) {}
 
+  void visitBorrowedFromInst(BorrowedFromInst *bfi) {
+    assert(use->getOperandNumber() > 0 && "a guaranteed phi is never opaque");
+    pass.guaranteedPhis.insert(cast<SILPhiArgument>(bfi->getBorrowedValue()));
+  }
+
   void visitStrongCopyUnownedValueInst(StrongCopyUnownedValueInst *scuvi) {
     assert(!scuvi->getType().isAddressOnly(*pass.function) &&
            "the result is never opaque");
@@ -4766,8 +4776,6 @@ protected:
   NO_OPAQUE_OPERAND(AutoreleaseValue)
   NO_OPAQUE_OPERAND(BeginDeallocRef)
 
-  UNIMPLEMENTED_OPAQUE_OPERAND(BorrowedFrom)
-
 #undef NO_OPAQUE_OPERAND
 #undef UNIMPLEMENTED_OPAQUE_OPERAND
 };
@@ -4904,7 +4912,7 @@ void UseRewriter::visitStoreInst(StoreInst *storeInst) {
 /// Emit end_borrows for a an incomplete BorrowedValue with only nonlifetime
 /// ending uses. This function inserts end_borrows on the lifetime boundary.
 static void emitEndBorrows(SILValue value, AddressLoweringState &pass) {
-  assert(BorrowedValue(value));
+  assert(BorrowedValue(value) || isa<BorrowedFromInst>(value));
 
   // Place end_borrows that cover the load_borrow uses. It is not necessary to
   // cover the outer borrow scope of the extract's operand. If a lexical
@@ -4917,9 +4925,14 @@ static void emitEndBorrows(SILValue value, AddressLoweringState &pass) {
   SmallVector<SILBasicBlock *, 4> discoveredBlocks;
   SSAPrunedLiveness liveness(value->getFunction(), &discoveredBlocks);
   liveness.initializeDef(value);
+  // A branch to a guaranteed phi ends the scope: reborrowGuaranteedPhis turns
+  // the phi into a reborrow.
+  SmallPtrSet<SILInstruction *, 2> phiBranches;
   SmallVector<ReturnInst *, 1> returns;
   for (auto *use : usePoints) {
-    if (auto *returnInst = dyn_cast<ReturnInst>(use->getUser()))
+    if (PhiOperand(use))
+      phiBranches.insert(use->getUser());
+    else if (auto *returnInst = dyn_cast<ReturnInst>(use->getUser()))
       returns.push_back(returnInst);
     else
       assert(!use->isLifetimeEnding() || isa<EndBorrowInst>(use->getUser()));
@@ -4927,6 +4940,9 @@ static void emitEndBorrows(SILValue value, AddressLoweringState &pass) {
   }
   PrunedLivenessBoundary guaranteedBoundary;
   liveness.computeBoundary(guaranteedBoundary);
+  llvm::erase_if(guaranteedBoundary.lastUsers, [&](SILInstruction *user) {
+    return phiBranches.contains(user);
+  });
   guaranteedBoundary.visitInsertionPoints(
       [&](SILBasicBlock::iterator insertPt) {
         pass.getBuilder(insertPt).createEndBorrow(pass.genLoc(), value);
@@ -6045,6 +6061,99 @@ static void removeBranchArgs(BranchInst *branch,
   pass.deleter.forceDelete(branch);
 }
 
+/// If \p value is a chain of struct or tuple projections of a load_borrow,
+/// return the address of the projected field, emitting its address projections.
+static SILValue projectLoadBorrowedAddress(SILValue value, SILBuilder &builder) {
+  if (auto *load = dyn_cast<LoadBorrowInst>(value))
+    return load->getOperand();
+  if (auto *extract = dyn_cast<StructExtractInst>(value)) {
+    if (SILValue base =
+            projectLoadBorrowedAddress(extract->getOperand(), builder))
+      return builder.createStructElementAddr(extract->getLoc(), base,
+                                             extract->getField());
+  }
+  if (auto *extract = dyn_cast<TupleExtractInst>(value)) {
+    if (SILValue base =
+            projectLoadBorrowedAddress(extract->getOperand(), builder))
+      return builder.createTupleElementAddr(extract->getLoc(), base,
+                                            extract->getFieldIndex());
+  }
+  return SILValue();
+}
+
+/// Turn each phi in pass.guaranteedPhis into a reborrow. Its incoming values
+/// were loaded in the predecessors, where no single borrow dominates the phi.
+static void reborrowGuaranteedPhis(AddressLoweringState &pass,
+                                   SILPassManager *pm) {
+  if (pass.guaranteedPhis.empty())
+    return;
+
+  // Borrows whose scope ends are recomputed.
+  SmallSetVector<SILValue, 8> borrows;
+  SmallVector<SILInstruction *, 4> replacedIncoming;
+  for (SILPhiArgument *phi : pass.guaranteedPhis)
+    phi->setReborrow(true);
+  for (SILPhiArgument *phi : pass.guaranteedPhis) {
+    phi->visitIncomingPhiOperands([&](Operand *incoming) {
+      SILValue value = incoming->get();
+      if (auto *bfi = dyn_cast<BorrowedFromInst>(value)) {
+        if (pass.guaranteedPhis.contains(
+                cast<SILPhiArgument>(bfi->getBorrowedValue())))
+          return true;
+      }
+      auto builder = pass.getBuilder(incoming->getUser()->getIterator());
+      auto loc = incoming->getUser()->getLoc();
+      if (SILValue addr = projectLoadBorrowedAddress(value, builder)) {
+        if (isa<LoadBorrowInst>(value) &&
+            llvm::all_of(value->getUses(), [&](Operand *use) {
+              return use == incoming || isa<EndBorrowInst>(use->getUser());
+            })) {
+          borrows.insert(value);
+          return true;
+        }
+        // Give the phi its own borrow of the field.
+        visitBorrowIntroducers(value, [&](SILValue introducer) {
+          borrows.insert(introducer);
+          return true;
+        });
+        incoming->set(builder.createLoadBorrow(loc, addr));
+        replacedIncoming.push_back(value->getDefiningInstruction());
+        return true;
+      }
+      visitBorrowIntroducers(value, [&](SILValue introducer) {
+        if (isa<LoadBorrowInst>(introducer))
+          llvm::report_fatal_error(
+              "guaranteed phi of a value forwarded from opaque storage");
+        return true;
+      });
+      // The enclosing borrow, e.g. a function argument, outlives the phi.
+      incoming->set(builder.createBeginBorrow(loc, value));
+      return true;
+    });
+  }
+  updateGuaranteedPhis(pm, pass.guaranteedPhis.getArrayRef());
+
+  for (auto *inst : replacedIncoming)
+    pass.deleter.deleteIfDead(inst);
+  for (SILValue borrow : borrows) {
+    auto *borrowInst = borrow->getDefiningInstruction();
+    if (borrowInst->isDeleted())
+      continue;
+    SmallVector<EndBorrowInst *, 4> endBorrows;
+    for (auto *use : borrow->getUses())
+      if (auto *endBorrow = dyn_cast<EndBorrowInst>(use->getUser()))
+        endBorrows.push_back(endBorrow);
+    for (auto *endBorrow : endBorrows)
+      pass.deleter.forceDelete(endBorrow);
+    if (borrow->use_empty())
+      pass.deleter.forceDelete(borrowInst);
+    else
+      emitEndBorrows(borrow, pass);
+  }
+  for (SILPhiArgument *phi : pass.guaranteedPhis)
+    emitEndBorrows(getBorrowedFromUser(phi), pass);
+}
+
 // Remove opaque phis. Their inputs have already been substituted with Undef.
 static void removeOpaquePhis(SILBasicBlock *bb, AddressLoweringState &pass) {
   if (bb->isEntry())
@@ -6234,6 +6343,8 @@ void swift::lowerAddress(SILPassManager *pm, SILFunction *function) {
   // address from the 'valueStorageMap'. This materializes projections in
   // forward order, setting 'storageAddress' for each projection as it goes.
   rewriteFunction(pass);
+
+  reborrowGuaranteedPhis(pass, pm);
 
   allocator.finalizeOpaqueStorage();
 

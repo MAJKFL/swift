@@ -1,0 +1,203 @@
+// RUN: %target-sil-opt -sil-print-types -address-lowering -enable-sil-opaque-values -module-name Swift -sil-verify-all %s | %FileCheck %s
+
+import Builtin
+
+sil_stage raw
+
+typealias AnyObject = Builtin.AnyObject
+
+protocol P {}
+
+struct Pair {
+  var a: AnyObject
+  var b: AnyObject
+}
+
+struct SRef<T> {
+  var object: AnyObject
+  var other: AnyObject
+  var pair: Pair
+  var element: T
+}
+
+sil @takeGuaranteedRef : $@convention(thin) (@guaranteed AnyObject) -> ()
+
+// CHECK-LABEL: sil [ossa] @borrowed_from_extract : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+// CHECK:       bb0(%0 : $*SRef<T>):
+// CHECK-NEXT:    [[A:%.*]] = struct_element_addr %0 : $*SRef<T>, #SRef.object
+// CHECK-NEXT:    [[L:%.*]] = load_borrow [[A]] : $*AnyObject
+// CHECK-NEXT:    br bb1([[L]] : $AnyObject)
+// CHECK:       bb1([[P:%.*]] : @reborrow $AnyObject):
+// CHECK-NEXT:    [[B:%.*]] = borrowed [[P]] : $AnyObject from ()
+// CHECK:         apply %{{.*}}([[B]])
+// CHECK-NEXT:    end_borrow [[B]] : $AnyObject
+// CHECK-LABEL: } // end sil function 'borrowed_from_extract'
+sil [ossa] @borrowed_from_extract : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+bb0(%0 : @guaranteed $SRef<T>):
+  %1 = struct_extract %0 : $SRef<T>, #SRef.object
+  br bb1(%1 : $AnyObject)
+bb1(%3 : @guaranteed $AnyObject):
+  %4 = borrowed %3 : $AnyObject from (%0 : $SRef<T>)
+  %5 = function_ref @takeGuaranteedRef : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %6 = apply %5(%4) : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @borrowed_from_two_predecessors : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+// CHECK:       bb1:
+// CHECK-NEXT:    [[A1:%.*]] = struct_element_addr %{{.*}} : $*SRef<T>, #SRef.object
+// CHECK-NEXT:    [[L1:%.*]] = load_borrow [[A1]] : $*AnyObject
+// CHECK-NEXT:    br bb3([[L1]] : $AnyObject)
+// CHECK:       bb2:
+// CHECK-NEXT:    [[A2:%.*]] = struct_element_addr %{{.*}} : $*SRef<T>, #SRef.other
+// CHECK-NEXT:    [[L2:%.*]] = load_borrow [[A2]] : $*AnyObject
+// CHECK-NEXT:    br bb3([[L2]] : $AnyObject)
+// CHECK:       bb3([[P:%.*]] : @reborrow $AnyObject):
+// CHECK-NEXT:    [[B:%.*]] = borrowed [[P]] : $AnyObject from ()
+// CHECK:         apply %{{.*}}([[B]])
+// CHECK-NEXT:    end_borrow [[B]] : $AnyObject
+// CHECK-NEXT:    destroy_addr
+// CHECK-LABEL: } // end sil function 'borrowed_from_two_predecessors'
+sil [ossa] @borrowed_from_two_predecessors : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+bb0(%0 : @guaranteed $SRef<T>):
+  %1 = copy_value %0 : $SRef<T>
+  %2 = begin_borrow %1 : $SRef<T>
+  cond_br undef, bb1, bb2
+bb1:
+  %3 = struct_extract %2 : $SRef<T>, #SRef.object
+  br bb3(%3 : $AnyObject)
+bb2:
+  %4 = struct_extract %2 : $SRef<T>, #SRef.other
+  br bb3(%4 : $AnyObject)
+bb3(%5 : @guaranteed $AnyObject):
+  %6 = borrowed %5 : $AnyObject from (%2 : $SRef<T>)
+  %7 = function_ref @takeGuaranteedRef : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %8 = apply %7(%6) : $@convention(thin) (@guaranteed AnyObject) -> ()
+  end_borrow %2 : $SRef<T>
+  destroy_value %1 : $SRef<T>
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @borrowed_from_nested_extract : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+// CHECK:       bb1:
+// CHECK-NEXT:    [[A:%.*]] = struct_element_addr %0 : $*SRef<T>, #SRef.pair
+// CHECK-NEXT:    [[AA:%.*]] = struct_element_addr [[A]] : $*Pair, #Pair.a
+// CHECK-NEXT:    [[L:%.*]] = load_borrow [[AA]] : $*AnyObject
+// CHECK-NEXT:    br bb3([[L]] : $AnyObject)
+// CHECK:       bb3([[P:%.*]] : @reborrow $AnyObject):
+// CHECK-NEXT:    [[B:%.*]] = borrowed [[P]] : $AnyObject from ()
+// CHECK-LABEL: } // end sil function 'borrowed_from_nested_extract'
+sil [ossa] @borrowed_from_nested_extract : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+bb0(%0 : @guaranteed $SRef<T>):
+  cond_br undef, bb1, bb2
+bb1:
+  %1 = struct_extract %0 : $SRef<T>, #SRef.pair
+  %2 = struct_extract %1 : $Pair, #Pair.a
+  br bb3(%2 : $AnyObject)
+bb2:
+  %3 = struct_extract %0 : $SRef<T>, #SRef.object
+  br bb3(%3 : $AnyObject)
+bb3(%4 : @guaranteed $AnyObject):
+  %5 = borrowed %4 : $AnyObject from (%0 : $SRef<T>)
+  %6 = function_ref @takeGuaranteedRef : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %7 = apply %6(%5) : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @borrowed_from_argument : $@convention(thin) <T> (@in_guaranteed SRef<T>, @guaranteed AnyObject) -> () {
+// CHECK:       bb2:
+// CHECK-NEXT:    [[BB:%.*]] = begin_borrow %1 : $AnyObject
+// CHECK-NEXT:    br bb3([[BB]] : $AnyObject)
+// CHECK:       bb3([[P:%.*]] : @reborrow $AnyObject):
+// CHECK-NEXT:    [[B:%.*]] = borrowed [[P]] : $AnyObject from (%1 : $AnyObject)
+// CHECK:         end_borrow [[B]] : $AnyObject
+// CHECK-LABEL: } // end sil function 'borrowed_from_argument'
+sil [ossa] @borrowed_from_argument : $@convention(thin) <T> (@in_guaranteed SRef<T>, @guaranteed AnyObject) -> () {
+bb0(%0 : @guaranteed $SRef<T>, %1 : @guaranteed $AnyObject):
+  cond_br undef, bb1, bb2
+bb1:
+  %2 = struct_extract %0 : $SRef<T>, #SRef.object
+  br bb3(%2 : $AnyObject)
+bb2:
+  br bb3(%1 : $AnyObject)
+bb3(%3 : @guaranteed $AnyObject):
+  %4 = borrowed %3 : $AnyObject from (%0 : $SRef<T>, %1 : $AnyObject)
+  %5 = function_ref @takeGuaranteedRef : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %6 = apply %5(%4) : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// The phi gets its own load_borrow because the field is still used after it.
+// CHECK-LABEL: sil [ossa] @borrowed_from_incoming_used_after_phi : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+// CHECK:       bb0(%0 : $*SRef<T>):
+// CHECK-NEXT:    [[A:%.*]] = struct_element_addr %0 : $*SRef<T>, #SRef.object
+// CHECK-NEXT:    [[L:%.*]] = load_borrow [[A]] : $*AnyObject
+// CHECK-NEXT:    [[LP:%.*]] = load_borrow [[A]] : $*AnyObject
+// CHECK-NEXT:    br bb1([[LP]] : $AnyObject)
+// CHECK:       bb1([[P:%.*]] : @reborrow $AnyObject):
+// CHECK-NEXT:    [[B:%.*]] = borrowed [[P]] : $AnyObject from ()
+// CHECK:         apply %{{.*}}([[B]])
+// CHECK-NEXT:    end_borrow [[B]] : $AnyObject
+// CHECK-NEXT:    apply %{{.*}}([[L]])
+// CHECK-NEXT:    end_borrow [[L]] : $AnyObject
+// CHECK-LABEL: } // end sil function 'borrowed_from_incoming_used_after_phi'
+sil [ossa] @borrowed_from_incoming_used_after_phi : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+bb0(%0 : @guaranteed $SRef<T>):
+  %1 = struct_extract %0 : $SRef<T>, #SRef.object
+  br bb1(%1 : $AnyObject)
+bb1(%2 : @guaranteed $AnyObject):
+  %3 = borrowed %2 : $AnyObject from (%0 : $SRef<T>)
+  %4 = function_ref @takeGuaranteedRef : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %5 = apply %4(%3) : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %6 = apply %4(%1) : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @borrowed_from_destructure : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+// CHECK:       bb0(%0 : $*SRef<T>):
+// CHECK-NEXT:    [[A:%.*]] = struct_element_addr %0 : $*SRef<T>, #SRef.object
+// CHECK-NEXT:    [[L:%.*]] = load_borrow [[A]] : $*AnyObject
+// CHECK:         br bb1([[L]] : $AnyObject)
+// CHECK:       bb1([[P:%.*]] : @reborrow $AnyObject):
+// CHECK-NEXT:    [[B:%.*]] = borrowed [[P]] : $AnyObject from ()
+// CHECK:         end_borrow [[B]] : $AnyObject
+// CHECK-LABEL: } // end sil function 'borrowed_from_destructure'
+sil [ossa] @borrowed_from_destructure : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+bb0(%0 : @guaranteed $SRef<T>):
+  (%1, %2, %3, %4) = destructure_struct %0 : $SRef<T>
+  br bb1(%1 : $AnyObject)
+bb1(%5 : @guaranteed $AnyObject):
+  %6 = borrowed %5 : $AnyObject from (%0 : $SRef<T>)
+  %7 = function_ref @takeGuaranteedRef : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %8 = apply %7(%6) : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @borrowed_from_phi_chain : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+// CHECK:       bb1([[P1:%.*]] : @reborrow $AnyObject):
+// CHECK-NEXT:    [[B1:%.*]] = borrowed [[P1]] : $AnyObject from ()
+// CHECK-NEXT:    br bb2([[B1]] : $AnyObject)
+// CHECK:       bb2([[P2:%.*]] : @reborrow $AnyObject):
+// CHECK-NEXT:    [[B2:%.*]] = borrowed [[P2]] : $AnyObject from ()
+// CHECK:         end_borrow [[B2]] : $AnyObject
+// CHECK-LABEL: } // end sil function 'borrowed_from_phi_chain'
+sil [ossa] @borrowed_from_phi_chain : $@convention(thin) <T> (@in_guaranteed SRef<T>) -> () {
+bb0(%0 : @guaranteed $SRef<T>):
+  %1 = struct_extract %0 : $SRef<T>, #SRef.object
+  br bb1(%1 : $AnyObject)
+bb1(%2 : @guaranteed $AnyObject):
+  %3 = borrowed %2 : $AnyObject from (%0 : $SRef<T>)
+  br bb2(%3 : $AnyObject)
+bb2(%4 : @guaranteed $AnyObject):
+  %5 = borrowed %4 : $AnyObject from (%0 : $SRef<T>)
+  %6 = function_ref @takeGuaranteedRef : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %7 = apply %6(%5) : $@convention(thin) (@guaranteed AnyObject) -> ()
+  %r = tuple ()
+  return %r : $()
+}
