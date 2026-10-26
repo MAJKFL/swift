@@ -4053,6 +4053,13 @@ protected:
 
   void visitMakeBorrowInst(MakeBorrowInst *mbi) {
     SILValue addr = addrMat.materializeAddress(use->get());
+    if (mbi->getType().isAddressOnly(*mbi->getFunction())) {
+      AddressMaterialization resultMat(pass, mbi, builder);
+      SILValue borrowAddr = resultMat.materializeAddress(mbi);
+      builder.createInitBorrowAddr(mbi->getLoc(), borrowAddr, addr);
+      markRewritten(mbi, borrowAddr);
+      return;
+    }
     auto* makeAddrBorrow = builder.createMakeAddrBorrow(mbi->getLoc(), addr);
     mbi->replaceAllUsesWith(makeAddrBorrow);
     pass.deleter.forceDelete(mbi);
@@ -5473,6 +5480,7 @@ protected:
   REWRITTEN_BY_USE(CopyableToMoveOnlyWrapperValue)
   REWRITTEN_BY_USE(DestructureStruct)
   REWRITTEN_BY_USE(ExplicitCopyValue)
+  REWRITTEN_BY_USE(MakeBorrow)
   REWRITTEN_BY_USE(MarkDependence)
   REWRITTEN_BY_USE(MarkUnresolvedNonCopyableValue)
   REWRITTEN_BY_USE(MoveOnlyWrapperToCopyableValue)
@@ -5493,7 +5501,6 @@ protected:
   UNIMPLEMENTED_OPAQUE_RESULT(LoadUnowned)
   UNIMPLEMENTED_OPAQUE_RESULT(LoadWeak)
   UNIMPLEMENTED_OPAQUE_RESULT(MakeAddrBorrow)
-  UNIMPLEMENTED_OPAQUE_RESULT(MakeBorrow)
   UNIMPLEMENTED_OPAQUE_RESULT(RawPointerToRef)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnum)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnumAddr)
