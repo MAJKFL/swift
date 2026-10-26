@@ -568,9 +568,6 @@ struct AddressLoweringState {
   // checked_cast_br instructions to loadable type which need to be rewritten.
   SmallVector<CheckedCastBranchInst *, 2> nonopaqueResultCCBs;
 
-  // debug_value operands that are an address-only undef.
-  SmallVector<Operand *, 2> undefDebugValueOperands;
-
   // All function-exiting terminators (return or throw instructions).
   SmallVector<TermInst *, 8> exitingInsts;
   
@@ -798,12 +795,6 @@ static unsigned insertIndirectReturnOrErrorArgs(AddressLoweringState &pass) {
   return argIdx;
 }
 
-/// Whether `value` is an undef of address-only type in OV-form.
-static bool isAddressOnlyUndef(SILValue value, AddressLoweringState &pass) {
-  return isa<SILUndef>(value) && value->getType().isObject() &&
-         value->getType().isAddressOnly(*pass.function);
-}
-
 namespace {
 /// Collect all opaque/resilient values, inserting them in `valueStorageMap` in
 /// RPO order.
@@ -852,18 +843,6 @@ void OpaqueValueVisitor::mapValueStorage() {
 
       if (auto *yieldInst = dyn_cast<YieldInst>(&inst)) {
         pass.yieldInsts.push_back(yieldInst);
-      }
-
-      // The verifier allows an object-typed undef for the `$error` variable,
-      // so leave those alone.
-      if (auto *debugInst = dyn_cast<DebugValueInst>(&inst)) {
-        auto varInfo = debugInst->getVarInfo();
-        if (!varInfo || !varInfo->isErrorVariable()) {
-          for (Operand &use : debugInst->getAllOperands()) {
-            if (isAddressOnlyUndef(use.get(), pass))
-              pass.undefDebugValueOperands.push_back(&use);
-          }
-        }
       }
 
       for (auto result : inst.getResults()) {
@@ -996,12 +975,34 @@ void OpaqueValueVisitor::canonicalizeReturnValues() {
   }
 }
 
+/// Map each opaque undef operand to an undef address.
+static void mapUndefStorage(AddressLoweringState &pass) {
+  for (auto &block : *pass.function) {
+    for (auto &inst : block) {
+      for (auto &operand : inst.getAllOperands()) {
+        auto *undef = dyn_cast<SILUndef>(operand.get());
+        if (!undef || !undef->getType().isObject() ||
+            !undef->getType().isAddressOnly(*pass.function) ||
+            pass.valueStorageMap.contains(undef))
+          continue;
+        pass.valueStorageMap.insertValue(
+            undef, SILUndef::get(pass.function,
+                                 undef->getType().getAddressType()));
+      }
+    }
+  }
+}
+
 /// Top-level entry point.
 ///
 /// Prepare the SIL by rewriting function arguments and returns.
 /// Initialize the ValueStorageMap with an entry for each opaque value in the
 /// function.
 static void prepareValueStorage(AddressLoweringState &pass) {
+  // Uses are rewritten in map order, and rewriting a phi operand replaces it
+  // with undef. Mapping undef first keeps that new use from being rewritten.
+  mapUndefStorage(pass);
+
   // Fixup this function's argument types with temporary loads.
   convertDirectToIndirectFunctionArgs(pass);
 
@@ -1091,12 +1092,15 @@ static Operand *getProjectedDefOperand(SILValue value) {
     LLVM_FALLTHROUGH;
   case ValueKind::OpenExistentialValueInst:
   case ValueKind::OpenExistentialBoxValueInst:
-    assert(value->getOwnershipKind() == OwnershipKind::Guaranteed);
+    // An operand derived from undef has no ownership.
+    assert(value->getOwnershipKind().isCompatibleWith(
+        OwnershipKind::Guaranteed));
     return &cast<SingleValueInstruction>(value)->getAllOperands()[0];
   case ValueKind::TuplePackExtractInst:
     if (value->getType().isTrivial(*value->getFunction()))
       return nullptr;
-    assert(value->getOwnershipKind() == OwnershipKind::Guaranteed);
+    assert(value->getOwnershipKind().isCompatibleWith(
+        OwnershipKind::Guaranteed));
     return &cast<SingleValueInstruction>(value)->getAllOperands()[1];
   }
 }
@@ -1160,6 +1164,22 @@ static Operand *getReusedStorageOperand(SILValue value) {
   }
   }
   return nullptr;
+}
+
+/// Whether \p value is an undef or shares the storage of one. A loadable
+/// subobject of such a value is undef.
+static bool hasUndefStorage(SILValue value) {
+  while (!isa<SILUndef>(value)) {
+    if (!value->getType().isAddressOnly(*value->getFunction()))
+      return false;
+    Operand *storageOper = getProjectedDefOperand(value);
+    if (!storageOper)
+      storageOper = getReusedStorageOperand(value);
+    if (!storageOper)
+      return false;
+    value = storageOper->get();
+  }
+  return true;
 }
 
 /// If \p operand can project into its user, return the SILValue representing
@@ -2181,7 +2201,9 @@ SILInstruction *AddressMaterialization::getProjectionInsertionPoint(
     auto const &storage = pair->storage;
     if (storage.storageAddress) {
       // There's already an address.  Projections should be inserted after it.
-      retval = storage.storageAddress->getNextInstruction();
+      // An undef address has no position.
+      if (auto *next = storage.storageAddress->getNextInstruction())
+        retval = next;
       break;
     }
     // It's necessary to consider obstructions at every level of aggregation*
@@ -2204,7 +2226,10 @@ SILInstruction *AddressMaterialization::getProjectionInsertionPoint(
       latestOpeningInst = loi->getNextInstruction();
     }
   }
-  assert(retval);
+  if (!retval) {
+    assert(isa<SILUndef>(userValue));
+    retval = &pass.function->getEntryBlock()->front();
+  }
   if (latestOpeningInst) {
     if (pass.domInfo->dominates(retval, latestOpeningInst))
       retval = latestOpeningInst;
@@ -3275,11 +3300,19 @@ private:
   }
 
   void replaceBlockArg(SILArgument *blockArg, SILValue addr) {
+    auto blockBuilder = pass.getBuilder(blockArg->getParent()->begin());
+    if (!blockArg->getType().isAddressOnly(*func) &&
+        hasUndefStorage(ccb->getOperand())) {
+      blockBuilder.createDestroyAddr(castLoc, addr);
+      blockArg->replaceAllUsesWith(SILUndef::get(blockArg));
+      blockArg->getParent()->eraseArgument(blockArg->getIndex());
+      return;
+    }
     // Replace all uses of the opaque block arg with a load from its
     // storage address.
     auto load =
-        pass.getBuilder(blockArg->getParent()->begin())
-            .createTrivialLoadOr(castLoc, addr, LoadOwnershipQualifier::Take);
+        blockBuilder.createTrivialLoadOr(castLoc, addr,
+                                         LoadOwnershipQualifier::Take);
     blockArg->replaceAllUsesWith(load);
 
     blockArg->getParent()->eraseArgument(blockArg->getIndex());
@@ -4157,6 +4190,10 @@ protected:
 
   void visitDebugValueInst(DebugValueInst *debugInst) {
     SILValue srcVal = use->get();
+    // The verifier allows an object-typed undef for the `$error` variable.
+    auto varInfo = debugInst->getVarInfo();
+    if (isa<SILUndef>(srcVal) && varInfo && varInfo->isErrorVariable())
+      return;
     SILValue srcAddr = pass.valueStorageMap.getStorage(srcVal).storageAddress;
     use->set(srcAddr);
     debugInst->prependDeref(use->getOperandNumber());
@@ -4312,6 +4349,12 @@ protected:
 
   void rewriteOpaqueUncheckedCastUse(SingleValueInstruction *uncheckedCastInst) {
     SILValue srcVal = uncheckedCastInst->getOperand(0);
+    if (!uncheckedCastInst->getType().isAddressOnly(*pass.function) &&
+        hasUndefStorage(srcVal)) {
+      uncheckedCastInst->replaceAllUsesWith(SILUndef::get(uncheckedCastInst));
+      pass.deleter.forceDelete(uncheckedCastInst);
+      return;
+    }
     SILValue srcAddr = pass.valueStorageMap.getStorage(srcVal).storageAddress;
 
     auto destAddr = builder.createUncheckedAddrCast(
@@ -4371,6 +4414,12 @@ protected:
       UnconditionalCheckedCastInst *uncondCheckedCast) {
     assert(uncondCheckedCast->getOperand()->getType().isAddressOnly(
         *pass.function));
+    if (!uncondCheckedCast->getType().isAddressOnly(*pass.function) &&
+        hasUndefStorage(use->get())) {
+      uncondCheckedCast->replaceAllUsesWith(SILUndef::get(uncondCheckedCast));
+      pass.deleter.forceDelete(uncondCheckedCast);
+      return;
+    }
     auto *uccai = rewriteUnconditionalCheckedCastInst(uncondCheckedCast, pass);
     if (uncondCheckedCast->getType().isAddressOnly(*pass.function)) {
       markRewritten(uncondCheckedCast, uccai->getDest());
@@ -4593,6 +4642,11 @@ protected:
 
 void UseRewriter::rewriteDestructure(SILInstruction *destructure) {
   for (auto result : destructure->getResults()) {
+    if (!result->getType().isAddressOnly(*pass.function) &&
+        hasUndefStorage(use->get())) {
+      result->replaceAllUsesWith(SILUndef::get(result));
+      continue;
+    }
     AddressMaterialization addrMat(pass, result, builder);
     SILValue extractAddr = addrMat.materializeDefProjection(result);
     if (result->getType().isAddressOnly(*pass.function)) {
@@ -4805,6 +4859,12 @@ emitEndBorrowsAtEnclosingGuaranteedBoundary(SILValue lifetimeToEnd,
 
 // Extract from an opaque struct or tuple.
 void UseRewriter::emitExtract(SingleValueInstruction *extractInst) {
+  if (!extractInst->getType().isAddressOnly(*pass.function) &&
+      hasUndefStorage(use->get())) {
+    extractInst->replaceAllUsesWith(SILUndef::get(extractInst));
+    pass.deleter.forceDelete(extractInst);
+    return;
+  }
   if (extractInst->getType().isAddressOnly(*pass.function) &&
       !getProjectedDefOperand(extractInst)) {
     AddressMaterialization srcMat(pass, extractInst->getIterator(), builder);
@@ -4956,6 +5016,12 @@ void UseRewriter::visitSwitchEnumInst(SwitchEnumInst * switchEnum) {
     assert(&switchEnum->getOperandRef() == getReusedStorageOperand(caseArg));
     assert(caseDecl->hasAssociatedValues() && "caseBB has a payload argument");
 
+    if (!caseArg->getType().isAddressOnly(*pass.function) &&
+        hasUndefStorage(enumVal)) {
+      caseArg->replaceAllUsesWith(SILUndef::get(caseArg));
+      caseBB->eraseArgument(0);
+      return;
+    }
     SILBuilder caseBuilder = pass.getBuilder(caseBB->begin());
     SILValue caseAddr;
     if (borrowIntoScratch) {
@@ -5048,6 +5114,13 @@ void UseRewriter::visitUncheckedEnumDataInst(
   assert(use == getReusedStorageOperand(enumDataInst));
 
   assert(enumDataInst->getOwnershipKind() != OwnershipKind::Guaranteed);
+
+  if (!enumDataInst->getType().isAddressOnly(*pass.function) &&
+      hasUndefStorage(use->get())) {
+    enumDataInst->replaceAllUsesWith(SILUndef::get(enumDataInst));
+    pass.deleter.forceDelete(enumDataInst);
+    return;
+  }
 
   auto srcAddr = pass.valueStorageMap.getStorage(use->get()).storageAddress;
 
@@ -5676,15 +5749,6 @@ static void rewriteFunction(AddressLoweringState &pass) {
 
   for (auto *ccbi : pass.nonopaqueResultCCBs) {
     CheckedCastBrRewriter(ccbi, pass).rewrite();
-  }
-
-  // Rewrite `debug_value undef : $T` into the form the address pipeline
-  // produces for the same code: `debug_value undef : $*T, ..., expr op_deref`.
-  for (Operand *use : pass.undefDebugValueOperands) {
-    auto *debugInst = cast<DebugValueInst>(use->getUser());
-    SILType addrType = use->get()->getType().getAddressType();
-    use->set(SILUndef::get(pass.function, addrType));
-    debugInst->prependDeref(use->getOperandNumber());
   }
 
   // Rewrite this function's return value now that all opaque values within the

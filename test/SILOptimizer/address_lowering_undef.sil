@@ -1,0 +1,436 @@
+// RUN: %target-sil-opt -sil-print-types -address-lowering -enable-sil-opaque-values -module-name Swift -sil-verify-all %s | %FileCheck %s
+
+import Builtin
+
+sil_stage raw
+
+class Klass {}
+
+protocol P {}
+
+struct S<T> {
+  var t: T
+  var k: Klass
+}
+
+enum E<T> {
+  case a(T)
+  case k(Klass)
+  case b
+}
+
+sil @consumeT : $@convention(thin) <T> (@in T) -> ()
+sil @borrowT : $@convention(thin) <T> (@in_guaranteed T) -> ()
+sil @consumeKlass : $@convention(thin) (@owned Klass) -> ()
+
+// CHECK-LABEL: sil [ossa] @copy_value : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    copy_addr undef to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'copy_value'
+sil [ossa] @copy_value : $@convention(thin) <T> () -> @out T {
+bb0:
+  %0 = copy_value undef : $T
+  return %0 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @begin_borrow : $@convention(thin) <T> () -> () {
+// CHECK:       bb0:
+// CHECK:         [[F:%.*]] = function_ref @borrowT
+// CHECK-NEXT:    apply [[F]]<T>(undef) : $@convention(thin) <τ_0_0> (@in_guaranteed τ_0_0) -> ()
+// CHECK-LABEL: } // end sil function 'begin_borrow'
+sil [ossa] @begin_borrow : $@convention(thin) <T> () -> () {
+bb0:
+  %0 = begin_borrow undef : $T
+  %f = function_ref @borrowT : $@convention(thin) <T> (@in_guaranteed T) -> ()
+  %a = apply %f<T>(%0) : $@convention(thin) <T> (@in_guaranteed T) -> ()
+  end_borrow %0 : $T
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @move_value : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    copy_addr [take] undef to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'move_value'
+sil [ossa] @move_value : $@convention(thin) <T> () -> @out T {
+bb0:
+  %0 = move_value undef : $T
+  return %0 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @mark_dependence : $@convention(thin) <T> (Builtin.Int64) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : $Builtin.Int64):
+// CHECK-NEXT:    mark_dependence_addr undef : $*T on %1 : $Builtin.Int64
+// CHECK-NEXT:    copy_addr [take] undef to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'mark_dependence'
+sil [ossa] @mark_dependence : $@convention(thin) <T> (Builtin.Int64) -> @out T {
+bb0(%0 : $Builtin.Int64):
+  %1 = mark_dependence undef : $T on %0 : $Builtin.Int64
+  return %1 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @destructure_struct : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK:         function_ref @consumeKlass
+// CHECK-NEXT:    apply %{{.*}}(undef) : $@convention(thin) (@owned Klass) -> ()
+// CHECK-NEXT:    [[T:%.*]] = struct_element_addr undef : $*S<T>, #S.t
+// CHECK-NEXT:    copy_addr [take] [[T]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'destructure_struct'
+sil [ossa] @destructure_struct : $@convention(thin) <T> () -> @out T {
+bb0:
+  (%0, %1) = destructure_struct undef : $S<T>
+  %f = function_ref @consumeKlass : $@convention(thin) (@owned Klass) -> ()
+  %a = apply %f(%1) : $@convention(thin) (@owned Klass) -> ()
+  return %0 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @destructure_tuple : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    [[T:%.*]] = tuple_element_addr undef : $*(T, Klass), 0
+// CHECK-NEXT:    copy_addr [take] [[T]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'destructure_tuple'
+sil [ossa] @destructure_tuple : $@convention(thin) <T> () -> @out T {
+bb0:
+  (%0, %1) = destructure_tuple undef : $(T, Klass)
+  return %0 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @struct_extract : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    [[T:%.*]] = struct_element_addr undef : $*S<T>, #S.t
+// CHECK-NEXT:    copy_addr [[T]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'struct_extract'
+sil [ossa] @struct_extract : $@convention(thin) <T> () -> @out T {
+bb0:
+  %0 = struct_extract undef : $S<T>, #S.t
+  %1 = copy_value %0 : $T
+  return %1 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @struct_extract_loadable : $@convention(thin) <T> () -> () {
+// CHECK:       bb0:
+// CHECK:         [[F:%.*]] = function_ref @consumeKlass
+// CHECK-NEXT:    apply [[F]](undef) : $@convention(thin) (@owned Klass) -> ()
+// CHECK-LABEL: } // end sil function 'struct_extract_loadable'
+sil [ossa] @struct_extract_loadable : $@convention(thin) <T> () -> () {
+bb0:
+  %0 = struct_extract undef : $S<T>, #S.k
+  %f = function_ref @consumeKlass : $@convention(thin) (@owned Klass) -> ()
+  %a = apply %f(%0) : $@convention(thin) (@owned Klass) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @struct_extract_loadable_borrowed : $@convention(thin) <T> () -> @owned Klass {
+// CHECK:       bb0:
+// CHECK-NEXT:    [[C:%.*]] = copy_value undef : $Klass
+// CHECK-NEXT:    return [[C]] : $Klass
+// CHECK-LABEL: } // end sil function 'struct_extract_loadable_borrowed'
+sil [ossa] @struct_extract_loadable_borrowed : $@convention(thin) <T> () -> @owned Klass {
+bb0:
+  %0 = begin_borrow undef : $S<T>
+  %1 = struct_extract %0 : $S<T>, #S.k
+  %2 = copy_value %1 : $Klass
+  end_borrow %0 : $S<T>
+  return %2 : $Klass
+}
+
+// CHECK-LABEL: sil [ossa] @tuple_extract : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    [[T:%.*]] = tuple_element_addr undef : $*(T, Builtin.Int64), 0
+// CHECK-NEXT:    copy_addr [[T]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'tuple_extract'
+sil [ossa] @tuple_extract : $@convention(thin) <T> () -> @out T {
+bb0:
+  %0 = tuple_extract undef : $(T, Builtin.Int64), 0
+  %1 = copy_value %0 : $T
+  return %1 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @unchecked_enum_data : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    [[T:%.*]] = unchecked_inplace_enum_data_addr undef : $*E<T>, #E.a!enumelt
+// CHECK-NEXT:    copy_addr [take] [[T]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'unchecked_enum_data'
+sil [ossa] @unchecked_enum_data : $@convention(thin) <T> () -> @out T {
+bb0:
+  %0 = unchecked_enum_data undef : $E<T>, #E.a!enumelt
+  return %0 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @unchecked_enum_data_loadable : $@convention(thin) <T> () -> @owned Klass {
+// CHECK:       bb0:
+// CHECK-NEXT:    [[C:%.*]] = copy_value undef : $Klass
+// CHECK-NEXT:    return [[C]] : $Klass
+// CHECK-LABEL: } // end sil function 'unchecked_enum_data_loadable'
+sil [ossa] @unchecked_enum_data_loadable : $@convention(thin) <T> () -> @owned Klass {
+bb0:
+  %0 = unchecked_enum_data undef : $E<T>, #E.k!enumelt
+  %1 = copy_value %0 : $Klass
+  return %1 : $Klass
+}
+
+// CHECK-LABEL: sil [ossa] @switch_enum : $@convention(thin) <T> () -> () {
+// CHECK:       bb0:
+// CHECK-NEXT:    switch_enum_addr undef : $*E<T>, case #E.a!enumelt: bb1, case #E.k!enumelt: bb2, case #E.b!enumelt: bb3
+// CHECK:       bb1:
+// CHECK-NEXT:    [[T:%.*]] = unchecked_inplace_enum_data_addr undef : $*E<T>, #E.a!enumelt
+// CHECK:         function_ref @consumeT
+// CHECK-NEXT:    apply %{{.*}}<T>([[T]])
+// CHECK:       bb2:
+// CHECK:         function_ref @consumeKlass
+// CHECK-NEXT:    apply %{{.*}}(undef) : $@convention(thin) (@owned Klass) -> ()
+// CHECK-LABEL: } // end sil function 'switch_enum'
+sil [ossa] @switch_enum : $@convention(thin) <T> () -> () {
+bb0:
+  switch_enum undef : $E<T>, case #E.a!enumelt: bb1, case #E.k!enumelt: bb2, case #E.b!enumelt: bb3
+bb1(%1 : $T):
+  %f = function_ref @consumeT : $@convention(thin) <T> (@in T) -> ()
+  %a = apply %f<T>(%1) : $@convention(thin) <T> (@in T) -> ()
+  br bb4
+bb2(%2 : $Klass):
+  %g = function_ref @consumeKlass : $@convention(thin) (@owned Klass) -> ()
+  %b = apply %g(%2) : $@convention(thin) (@owned Klass) -> ()
+  br bb4
+bb3:
+  br bb4
+bb4:
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @select_enum : $@convention(thin) <T> () -> Builtin.Int1 {
+// CHECK:         select_enum_addr undef : $*E<T>, case #E.a!enumelt:
+// CHECK-LABEL: } // end sil function 'select_enum'
+sil [ossa] @select_enum : $@convention(thin) <T> () -> Builtin.Int1 {
+bb0:
+  %t = integer_literal $Builtin.Int1, 1
+  %f = integer_literal $Builtin.Int1, 0
+  %0 = select_enum undef : $E<T>, case #E.a!enumelt: %t, default %f : $Builtin.Int1
+  return %0 : $Builtin.Int1
+}
+
+// CHECK-LABEL: sil [ossa] @checked_cast_br : $@convention(thin) <T> () -> () {
+// CHECK:       bb0:
+// CHECK-NEXT:    [[K:%.*]] = alloc_stack $Klass
+// CHECK-NEXT:    checked_cast_addr_br take_on_success T in undef : $*T to Klass in [[K]] : $*Klass, bb1, bb2
+// CHECK:       bb1:
+// CHECK-NEXT:    destroy_addr [[K]] : $*Klass
+// CHECK-NEXT:    dealloc_stack [[K]] : $*Klass
+// CHECK:       bb2:
+// CHECK-NEXT:    dealloc_stack [[K]] : $*Klass
+// CHECK:         function_ref @consumeT
+// CHECK-NEXT:    apply %{{.*}}<T>(undef)
+// CHECK-LABEL: } // end sil function 'checked_cast_br'
+sil [ossa] @checked_cast_br : $@convention(thin) <T> () -> () {
+bb0:
+  checked_cast_br T in undef : $T to Klass, bb1, bb2
+bb1(%1 : $Klass):
+  br bb3
+bb2(%2 : $T):
+  %f = function_ref @consumeT : $@convention(thin) <T> (@in T) -> ()
+  %a = apply %f<T>(%2) : $@convention(thin) <T> (@in T) -> ()
+  br bb3
+bb3:
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @unconditional_checked_cast_loadable : $@convention(thin) <T> () -> @owned Klass {
+// CHECK:       bb0:
+// CHECK-NEXT:    return undef : $Klass
+// CHECK-LABEL: } // end sil function 'unconditional_checked_cast_loadable'
+sil [ossa] @unconditional_checked_cast_loadable : $@convention(thin) <T> () -> @owned Klass {
+bb0:
+  %0 = unconditional_checked_cast undef : $T to Klass
+  return %0 : $Klass
+}
+
+// CHECK-LABEL: sil [ossa] @unchecked_bitwise_cast : $@convention(thin) <T, U> () -> @out U {
+// CHECK:       bb0(%0 : $*U):
+// CHECK-NEXT:    [[U:%.*]] = unchecked_addr_cast undef : $*T to $*U
+// CHECK-NEXT:    copy_addr [[U]] to [init] %0 : $*U
+// CHECK-LABEL: } // end sil function 'unchecked_bitwise_cast'
+sil [ossa] @unchecked_bitwise_cast : $@convention(thin) <T, U> () -> @out U {
+bb0:
+  %0 = unchecked_bitwise_cast undef : $T to $U
+  %1 = copy_value %0 : $U
+  return %1 : $U
+}
+
+// CHECK-LABEL: sil [ossa] @unchecked_value_cast_loadable : $@convention(thin) <T> () -> () {
+// CHECK:       bb0:
+// CHECK:         [[F:%.*]] = function_ref @consumeKlass
+// CHECK-NEXT:    apply [[F]](undef) : $@convention(thin) (@owned Klass) -> ()
+// CHECK-LABEL: } // end sil function 'unchecked_value_cast_loadable'
+sil [ossa] @unchecked_value_cast_loadable : $@convention(thin) <T> () -> () {
+bb0:
+  %0 = unchecked_value_cast undef : $T to $Klass
+  %f = function_ref @consumeKlass : $@convention(thin) (@owned Klass) -> ()
+  %a = apply %f(%0) : $@convention(thin) (@owned Klass) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @open_existential_value : $@convention(thin) () -> () {
+// CHECK:       bb0:
+// CHECK-NEXT:    [[O:%.*]] = open_existential_addr immutable_access undef : $*any P to $*@opened(1, any P) Self
+// CHECK:         function_ref @borrowT
+// CHECK-NEXT:    apply %{{.*}}<@opened(1, any P) Self>([[O]])
+// CHECK-LABEL: } // end sil function 'open_existential_value'
+sil [ossa] @open_existential_value : $@convention(thin) () -> () {
+bb0:
+  %0 = open_existential_value undef : $any P to $@opened(1, any P) Self
+  %f = function_ref @borrowT : $@convention(thin) <T> (@in_guaranteed T) -> ()
+  %a = apply %f<@opened(1, any P) Self>(%0) : $@convention(thin) <T> (@in_guaranteed T) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @copyable_to_moveonlywrapper : $@convention(thin) <T> () -> () {
+// CHECK:       bb0:
+// CHECK-NEXT:    [[W:%.*]] = copyable_to_moveonlywrapper_addr undef : $*T
+// CHECK-NEXT:    [[C:%.*]] = moveonlywrapper_to_copyable_addr [[W]] : $*@moveOnly T
+// CHECK:         function_ref @consumeT
+// CHECK-NEXT:    apply %{{.*}}<T>([[C]])
+// CHECK-LABEL: } // end sil function 'copyable_to_moveonlywrapper'
+sil [ossa] @copyable_to_moveonlywrapper : $@convention(thin) <T> () -> () {
+bb0:
+  %0 = copyable_to_moveonlywrapper [owned] undef : $T
+  %1 = moveonlywrapper_to_copyable [owned] %0 : $@moveOnly T
+  %f = function_ref @consumeT : $@convention(thin) <T> (@in T) -> ()
+  %a = apply %f<T>(%1) : $@convention(thin) <T> (@in T) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @struct_operand : $@convention(thin) <T> (@owned Klass) -> @out S<T> {
+// CHECK:       bb0(%0 : $*S<T>, %1 : @owned $Klass):
+// CHECK-NEXT:    [[T:%.*]] = struct_element_addr %0 : $*S<T>, #S.t
+// CHECK-NEXT:    copy_addr [take] undef to [init] [[T]] : $*T
+// CHECK-NEXT:    [[K:%.*]] = struct_element_addr %0 : $*S<T>, #S.k
+// CHECK-NEXT:    store %1 to [init] [[K]] : $*Klass
+// CHECK-LABEL: } // end sil function 'struct_operand'
+sil [ossa] @struct_operand : $@convention(thin) <T> (@owned Klass) -> @out S<T> {
+bb0(%0 : @owned $Klass):
+  %1 = struct $S<T> (undef : $T, %0 : $Klass)
+  return %1 : $S<T>
+}
+
+// CHECK-LABEL: sil [ossa] @tuple_operand : $@convention(thin) <T> () -> @out (T, T) {
+// CHECK:       bb0(%0 : $*(T, T)):
+// CHECK-NEXT:    [[T0:%.*]] = tuple_element_addr %0 : $*(T, T), 0
+// CHECK-NEXT:    copy_addr [take] undef to [init] [[T0]] : $*T
+// CHECK-NEXT:    [[T1:%.*]] = tuple_element_addr %0 : $*(T, T), 1
+// CHECK-NEXT:    copy_addr [take] undef to [init] [[T1]] : $*T
+// CHECK-LABEL: } // end sil function 'tuple_operand'
+sil [ossa] @tuple_operand : $@convention(thin) <T> () -> @out (T, T) {
+bb0:
+  %0 = tuple (undef : $T, undef : $T)
+  return %0 : $(T, T)
+}
+
+// CHECK-LABEL: sil [ossa] @enum_operand : $@convention(thin) <T> () -> @out E<T> {
+// CHECK:       bb0(%0 : $*E<T>):
+// CHECK-NEXT:    [[T:%.*]] = init_enum_data_addr %0 : $*E<T>, #E.a!enumelt
+// CHECK-NEXT:    copy_addr [take] undef to [init] [[T]] : $*T
+// CHECK-NEXT:    inject_enum_addr %0 : $*E<T>, #E.a!enumelt
+// CHECK-LABEL: } // end sil function 'enum_operand'
+sil [ossa] @enum_operand : $@convention(thin) <T> () -> @out E<T> {
+bb0:
+  %0 = enum $E<T>, #E.a!enumelt, undef : $T
+  return %0 : $E<T>
+}
+
+// CHECK-LABEL: sil [ossa] @init_existential_value : $@convention(thin) <T where T : P> () -> @out any P {
+// CHECK:       bb0(%0 : $*any P):
+// CHECK-NEXT:    [[T:%.*]] = init_existential_addr %0 : $*any P, $T
+// CHECK-NEXT:    copy_addr [take] undef to [init] [[T]] : $*T
+// CHECK-LABEL: } // end sil function 'init_existential_value'
+sil [ossa] @init_existential_value : $@convention(thin) <T where T : P> () -> @out any P {
+bb0:
+  %0 = init_existential_value undef : $T, $T, $any P
+  return %0 : $any P
+}
+
+// CHECK-LABEL: sil [ossa] @store : $@convention(thin) <T> (@inout T) -> () {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    copy_addr [take] undef to %0 : $*T
+// CHECK-LABEL: } // end sil function 'store'
+sil [ossa] @store : $@convention(thin) <T> (@inout T) -> () {
+bb0(%0 : $*T):
+  store undef to [assign] %0 : $*T
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @apply_arguments : $@convention(thin) <T> () -> () {
+// CHECK:       bb0:
+// CHECK:         [[C:%.*]] = function_ref @consumeT
+// CHECK-NEXT:    apply [[C]]<T>(undef) : $@convention(thin) <τ_0_0> (@in τ_0_0) -> ()
+// CHECK:         [[B:%.*]] = function_ref @borrowT
+// CHECK-NEXT:    apply [[B]]<T>(undef) : $@convention(thin) <τ_0_0> (@in_guaranteed τ_0_0) -> ()
+// CHECK-LABEL: } // end sil function 'apply_arguments'
+sil [ossa] @apply_arguments : $@convention(thin) <T> () -> () {
+bb0:
+  %f = function_ref @consumeT : $@convention(thin) <T> (@in T) -> ()
+  %a = apply %f<T>(undef) : $@convention(thin) <T> (@in T) -> ()
+  %g = function_ref @borrowT : $@convention(thin) <T> (@in_guaranteed T) -> ()
+  %b = apply %g<T>(undef) : $@convention(thin) <T> (@in_guaranteed T) -> ()
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @return_value : $@convention(thin) <T> () -> @out T {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    copy_addr [take] undef to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'return_value'
+sil [ossa] @return_value : $@convention(thin) <T> () -> @out T {
+bb0:
+  return undef : $T
+}
+
+// CHECK-LABEL: sil [ossa] @phi : $@convention(thin) <T> (@in T) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : $*T):
+// CHECK:       bb1:
+// CHECK-NEXT:    copy_addr [take] %1 to [init] %0 : $*T
+// CHECK:       bb2:
+// CHECK-NEXT:    destroy_addr %1 : $*T
+// CHECK-NEXT:    copy_addr [take] undef to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'phi'
+sil [ossa] @phi : $@convention(thin) <T> (@in T) -> @out T {
+bb0(%0 : @owned $T):
+  cond_br undef, bb1, bb2
+bb1:
+  br bb3(%0 : $T)
+bb2:
+  destroy_value %0 : $T
+  br bb3(undef : $T)
+bb3(%1 : @owned $T):
+  return %1 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @yield : $@yield_once @convention(thin) <T> () -> @yields @in_guaranteed T {
+// CHECK:       bb0:
+// CHECK-NEXT:    yield undef : $*T, resume bb1, unwind bb2
+// CHECK-LABEL: } // end sil function 'yield'
+sil [ossa] @yield : $@yield_once @convention(thin) <T> () -> @yields @in_guaranteed T {
+bb0:
+  yield undef : $T, resume bb1, unwind bb2
+bb1:
+  %r = tuple ()
+  return %r : $()
+bb2:
+  unwind
+}
+
+// CHECK-LABEL: sil [ossa] @debug_value : $@convention(thin) <T> () -> () {
+// CHECK:       bb0:
+// CHECK-NEXT:    debug_value undef : $*T, let, name "x", expr op_deref
+// CHECK-LABEL: } // end sil function 'debug_value'
+sil [ossa] @debug_value : $@convention(thin) <T> () -> () {
+bb0:
+  debug_value undef : $T, let, name "x"
+  %r = tuple ()
+  return %r : $()
+}
