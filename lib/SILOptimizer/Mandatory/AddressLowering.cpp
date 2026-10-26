@@ -1134,6 +1134,8 @@ static Operand *getReusedStorageOperand(SILValue value) {
     break;
 
   case ValueKind::CopyableToMoveOnlyWrapperValueInst:
+  case ValueKind::EndCOWMutationInst:
+  case ValueKind::EndInitLetRefInst:
   case ValueKind::MoveOnlyWrapperToCopyableValueInst:
   case ValueKind::OpenExistentialValueInst:
   case ValueKind::OpenExistentialBoxValueInst:
@@ -1151,6 +1153,13 @@ static Operand *getReusedStorageOperand(SILValue value) {
             *castInst->getFunction()))
       return nullptr;
     return &castInst->getOperandRef(0);
+  }
+
+  case ValueKind::BuiltinInst: {
+    auto *bi = cast<BuiltinInst>(value);
+    if (bi->getBuiltinKind() == BuiltinValueKind::COWBufferForReading)
+      return &bi->getOperandRef(0);
+    break;
   }
 
   case ValueKind::SILPhiArgument: {
@@ -3729,6 +3738,8 @@ enum class OpaqueBuiltinKind {
   OperandsByAddress,
   /// An opaque result becomes a leading address operand. No operand is opaque.
   IndirectResult,
+  /// The result reuses the storage of its opaque operand.
+  ReusesOperandStorage,
   PolymorphicBinary,
   AddressOfBorrow,
   UnprotectedAddressOfBorrow,
@@ -3908,15 +3919,15 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::TaskRunInline:
     return OpaqueBuiltinKind::IndirectResult;
 
+  case BuiltinValueKind::COWBufferForReading:
+    return OpaqueBuiltinKind::ReusesOperandStorage;
+
   case BuiltinValueKind::AddressOfBorrowOpaque:
     return OpaqueBuiltinKind::AddressOfBorrow;
   case BuiltinValueKind::UnprotectedAddressOfBorrowOpaque:
     return OpaqueBuiltinKind::UnprotectedAddressOfBorrow;
   case BuiltinValueKind::ZeroInitializer:
     return OpaqueBuiltinKind::ZeroInitializer;
-
-  case BuiltinValueKind::COWBufferForReading:
-    return OpaqueBuiltinKind::Unimplemented;
 
   case BuiltinValueKind::None:
     llvm_unreachable("getBuiltinKind() does not return None");
@@ -4068,6 +4079,13 @@ protected:
       break;
     case OpaqueBuiltinKind::UnprotectedAddressOfBorrow:
       visitAddressOfBorrowBuiltinInst(bi, /*stackProtected=*/false);
+      break;
+    // COWBufferForReading has no address form. It only lets ref_element_addr
+    // become [immutable], which needs a concrete class type.
+    case OpaqueBuiltinKind::ReusesOperandStorage:
+      assert(use == getReusedStorageOperand(bi));
+      markRewritten(bi,
+                    pass.valueStorageMap.getStorage(use->get()).storageAddress);
       break;
     case OpaqueBuiltinKind::NeverOpaque:
     case OpaqueBuiltinKind::IndirectResult:
@@ -4286,6 +4304,22 @@ protected:
     assert(use == getProjectedDefOperand(inst));
     markRewritten(inst,
                   pass.valueStorageMap.getStorage(use->get()).storageAddress);
+  }
+
+  // There is no address form. The marker only orders ref_element_addr
+  // [immutable], which needs a concrete class type.
+  void visitEndInitLetRefInst(EndInitLetRefInst *inst) {
+    assert(use == getReusedStorageOperand(inst));
+    markRewritten(inst,
+                  pass.valueStorageMap.getStorage(use->get()).storageAddress);
+  }
+
+  void visitEndCOWMutationInst(EndCOWMutationInst *inst) {
+    assert(use == getReusedStorageOperand(inst));
+    assert(!inst->doKeepUnique() && "end_cow_mutation_addr has no keep_unique");
+    SILValue addr = pass.valueStorageMap.getStorage(use->get()).storageAddress;
+    builder.createEndCOWMutationAddr(inst->getLoc(), addr);
+    markRewritten(inst, addr);
   }
 
   void visitMoveValueInst(MoveValueInst *mvi);
@@ -4697,8 +4731,6 @@ protected:
   UNIMPLEMENTED_OPAQUE_OPERAND(DereferenceAddrBorrow)
   UNIMPLEMENTED_OPAQUE_OPERAND(DereferenceBorrow)
   UNIMPLEMENTED_OPAQUE_OPERAND(DropDeinit)
-  UNIMPLEMENTED_OPAQUE_OPERAND(EndCOWMutation)
-  UNIMPLEMENTED_OPAQUE_OPERAND(EndInitLetRef)
   UNIMPLEMENTED_OPAQUE_OPERAND(RefToRawPointer)
   UNIMPLEMENTED_OPAQUE_OPERAND(SelectEnumAddr)
   UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedRefCast)
@@ -5386,6 +5418,8 @@ protected:
       storage.markRewritten();
       break;
     }
+    case OpaqueBuiltinKind::ReusesOperandStorage:
+      return opaqueDefNotRewrittenByUse(bi);
     case OpaqueBuiltinKind::NeverOpaque:
     case OpaqueBuiltinKind::OperandsByAddress:
     case OpaqueBuiltinKind::AddressOfBorrow:
@@ -5659,6 +5693,8 @@ protected:
   REWRITTEN_BY_USE(CopyValue)
   REWRITTEN_BY_USE(CopyableToMoveOnlyWrapperValue)
   REWRITTEN_BY_USE(DestructureStruct)
+  REWRITTEN_BY_USE(EndCOWMutation)
+  REWRITTEN_BY_USE(EndInitLetRef)
   REWRITTEN_BY_USE(ExplicitCopyValue)
   REWRITTEN_BY_USE(MakeBorrow)
   REWRITTEN_BY_USE(MarkDependence)
@@ -5690,8 +5726,6 @@ protected:
 
   UNIMPLEMENTED_OPAQUE_RESULT(DropDeinit)
   UNIMPLEMENTED_OPAQUE_RESULT(EndApply)
-  UNIMPLEMENTED_OPAQUE_RESULT(EndCOWMutation)
-  UNIMPLEMENTED_OPAQUE_RESULT(EndInitLetRef)
   UNIMPLEMENTED_OPAQUE_RESULT(MakeAddrBorrow)
   UNIMPLEMENTED_OPAQUE_RESULT(RawPointerToRef)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnum)
