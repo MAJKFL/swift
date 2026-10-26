@@ -1,0 +1,51 @@
+// RUN: %target-sil-opt -sil-print-types -address-lowering -enable-sil-opaque-values -sil-verify-all %s | %FileCheck %s
+
+// REQUIRES: concurrency
+
+sil_stage raw
+
+import Builtin
+import Swift
+import _Concurrency
+
+sil @makeT : $@convention(thin) <T> () -> @out T
+
+// CHECK-LABEL: sil [ossa] @addressOfRawLayoutArg : $@convention(thin) <T> (@in_guaranteed T) -> Builtin.RawPointer {
+// CHECK:       bb0(%0 : $*T):
+// CHECK-NEXT:    [[P:%.*]] = builtin "addressOfRawLayout"<T>(%0 : $*T) : $Builtin.RawPointer
+// CHECK-NEXT:    return [[P]] : $Builtin.RawPointer
+// CHECK-LABEL: } // end sil function 'addressOfRawLayoutArg'
+sil [ossa] @addressOfRawLayoutArg : $@convention(thin) <T> (@in_guaranteed T) -> Builtin.RawPointer {
+bb0(%0 : @guaranteed $T):
+  %1 = builtin "addressOfRawLayout"<T>(%0 : $T) : $Builtin.RawPointer
+  return %1 : $Builtin.RawPointer
+}
+
+// CHECK-LABEL: sil [ossa] @addressOfRawLayoutLocal : $@convention(thin) <T> () -> () {
+// CHECK:         [[S:%.*]] = alloc_stack $T
+// CHECK:         apply %{{.*}}<T>([[S]])
+// CHECK-NEXT:    builtin "addressOfRawLayout"<T>([[S]] : $*T) : $Builtin.RawPointer
+// CHECK-NEXT:    destroy_addr [[S]] : $*T
+// CHECK-LABEL: } // end sil function 'addressOfRawLayoutLocal'
+sil [ossa] @addressOfRawLayoutLocal : $@convention(thin) <T> () -> () {
+bb0:
+  %f = function_ref @makeT : $@convention(thin) <T> () -> @out T
+  %0 = apply %f<T>() : $@convention(thin) <T> () -> @out T
+  %1 = builtin "addressOfRawLayout"<T>(%0 : $T) : $Builtin.RawPointer
+  destroy_value %0 : $T
+  %r = tuple ()
+  return %r : $()
+}
+
+// CHECK-LABEL: sil [ossa] @taskPushDeadline : $@convention(thin) <C where C : Identifiable, C : Clock> (@in_guaranteed C, @in_guaranteed C.Instant) -> () {
+// CHECK:       bb0(%0 : $*C, %1 : $*C.Instant):
+// CHECK-NEXT:    [[R:%.*]] = builtin "taskPushDeadline"<C, C.Instant>(%0 : $*C, %1 : $*C.Instant) : $UnsafeRawPointer
+// CHECK-NEXT:    builtin "taskPopDeadline"([[R]] : $UnsafeRawPointer) : $()
+// CHECK-LABEL: } // end sil function 'taskPushDeadline'
+sil [ossa] @taskPushDeadline : $@convention(thin) <C where C : Clock, C : Identifiable> (@in_guaranteed C, @in_guaranteed C.Instant) -> () {
+bb0(%0 : @guaranteed $C, %1 : @guaranteed $C.Instant):
+  %2 = builtin "taskPushDeadline"<C, C.Instant>(%0 : $C, %1 : $C.Instant) : $UnsafeRawPointer
+  %3 = builtin "taskPopDeadline"(%2 : $UnsafeRawPointer) : $()
+  %r = tuple ()
+  return %r : $()
+}
