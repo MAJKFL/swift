@@ -1132,6 +1132,7 @@ static Operand *getReusedStorageOperand(SILValue value) {
     break;
 
   case ValueKind::CopyableToMoveOnlyWrapperValueInst:
+  case ValueKind::DropDeinitInst:
   case ValueKind::EndCOWMutationInst:
   case ValueKind::EndInitLetRefInst:
   case ValueKind::MoveOnlyWrapperToCopyableValueInst:
@@ -4337,6 +4338,14 @@ protected:
     markRewritten(inst, addr);
   }
 
+  // Destroys of the result were split per member before storage allocation.
+  void visitDropDeinitInst(DropDeinitInst *inst) {
+    assert(use == getReusedStorageOperand(inst));
+    SILValue srcAddr =
+        pass.valueStorageMap.getStorage(use->get()).storageAddress;
+    markRewritten(inst, builder.createDropDeinit(inst->getLoc(), srcAddr));
+  }
+
   void visitMoveValueInst(MoveValueInst *mvi);
 
   void visitMoveOnlyWrapperToCopyableValueInst(
@@ -4758,7 +4767,6 @@ protected:
   NO_OPAQUE_OPERAND(BeginDeallocRef)
 
   UNIMPLEMENTED_OPAQUE_OPERAND(BorrowedFrom)
-  UNIMPLEMENTED_OPAQUE_OPERAND(DropDeinit)
 
 #undef NO_OPAQUE_OPERAND
 #undef UNIMPLEMENTED_OPAQUE_OPERAND
@@ -5831,6 +5839,7 @@ protected:
   REWRITTEN_BY_USE(CopyValue)
   REWRITTEN_BY_USE(CopyableToMoveOnlyWrapperValue)
   REWRITTEN_BY_USE(DestructureStruct)
+  REWRITTEN_BY_USE(DropDeinit)
   REWRITTEN_BY_USE(EndCOWMutation)
   REWRITTEN_BY_USE(EndInitLetRef)
   REWRITTEN_BY_USE(ExplicitCopyValue)
@@ -5862,7 +5871,6 @@ protected:
   // Created only for a class reference, after this pass.
   NO_OPAQUE_RESULT(BeginDeallocRef)
 
-  UNIMPLEMENTED_OPAQUE_RESULT(DropDeinit)
   UNIMPLEMENTED_OPAQUE_RESULT(EndApply)
 
 #undef NO_OPAQUE_RESULT
@@ -6118,6 +6126,57 @@ static void deleteRewrittenInstructions(AddressLoweringState &pass) {
   pass.deleter.cleanupDeadInstructions();
 }
 
+/// Replace each destroy of an opaque drop_deinit result with destroys of its
+/// members, as OwnershipModelEliminator does for loadable types. A destroy_addr
+/// of the drop_deinit address would call the deinit. Splitting an enum destroy
+/// adds blocks, so this runs before the dominator tree is computed.
+static bool splitDropDeinitDestroys(SILFunction *function) {
+  SmallVector<DestroyValueInst *, 4> destroys;
+  for (auto &block : *function) {
+    for (auto &inst : block) {
+      auto *destroy = dyn_cast<DestroyValueInst>(&inst);
+      if (destroy &&
+          destroy->getOperand()->getType().isAddressOnly(*function) &&
+          isa<DropDeinitInst>(lookThroughOwnershipInsts(destroy->getOperand())))
+        destroys.push_back(destroy);
+    }
+  }
+  for (auto *destroy : destroys) {
+    SILValue value = destroy->getOperand();
+    SILType type = value->getType();
+    SILLocation loc = destroy->getLoc();
+    if (type.getStructDecl()) {
+      SILBuilderWithScope builder(destroy);
+      auto *destructure = builder.createDestructureStruct(loc, value);
+      for (SILValue member : destructure->getResults())
+        builder.emitDestroyValueOperation(loc, member);
+      destroy->eraseFromParent();
+      continue;
+    }
+    auto *destroyBlock = destroy->getParent();
+    auto *contBlock = destroyBlock->split(std::next(destroy->getIterator()));
+    SmallVector<std::pair<EnumElementDecl *, SILBasicBlock *>, 4> cases;
+    for (auto *element : type.getEnumDecl()->getAllElements()) {
+      auto *caseBlock = function->createBasicBlockBefore(contBlock);
+      SILBuilderWithScope builder(caseBlock, destroy);
+      if (element->hasAssociatedValues()) {
+        SILType payloadType = type.getEnumElementType(element, function);
+        auto *payload = caseBlock->createPhiArgument(
+            payloadType, payloadType.isTrivial(*function)
+                             ? OwnershipKind::None
+                             : OwnershipKind::Owned);
+        builder.emitDestroyValueOperation(loc, payload);
+      }
+      builder.createBranch(loc, contBlock);
+      cases.push_back({element, caseBlock});
+    }
+    SILBuilderWithScope(destroyBlock, destroy)
+        .createSwitchEnum(loc, value, nullptr, cases);
+    destroy->eraseFromParent();
+  }
+  return !destroys.empty();
+}
+
 void swift::lowerAddress(SILPassManager *pm, SILFunction *function) {
   // Skip functions already in lowered-address form: default (non-opaque-values)
   // mode, a function this pass already lowered (pipeline restarts can re-run a
@@ -6139,6 +6198,11 @@ void swift::lowerAddress(SILPassManager *pm, SILFunction *function) {
 
   // Ensure that blocks can be processed in RPO order.
   removeUnreachableBlocks(*function);
+
+  if (splitDropDeinitDestroys(function)) {
+    pm->invalidateAnalysis(
+        function, SILAnalysis::InvalidationKind::BranchesAndInstructions);
+  }
 
   auto *dominance = pm->getAnalysis<DominanceAnalysis>();
   auto *SLA = pm->getAnalysis<SILLoopAnalysis>();
