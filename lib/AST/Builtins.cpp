@@ -56,6 +56,12 @@ IntrinsicInfo::getOrCreateFnAttributes(ASTContext &Ctx) const {
   return FnAttrs.value();
 }
 
+/// Whether \p type is a builtin integer, floating-point or raw pointer type.
+static bool isBuiltinScalarType(Type type) {
+  return type->is<BuiltinIntegerType>() || type->is<BuiltinFloatType>() ||
+         type->is<BuiltinRawPointerType>();
+}
+
 Type swift::getBuiltinType(ASTContext &Context, StringRef Name) {
   // We first map to a kind using a StringSwitch so that we can perform an
   // exhaustive switch making it easier to know to update this code.
@@ -117,7 +123,7 @@ Type swift::getBuiltinType(ASTContext &Context, StringRef Name) {
       return Type();
 
     Type elementType = getBuiltinType(Context, Name.substr(xPos + 1));
-    if (!elementType)
+    if (!elementType || !isBuiltinScalarType(elementType))
       return Type();
 
     return BuiltinVectorType::get(Context, elementType, numElements);
@@ -2120,6 +2126,8 @@ static ValueDecl *getSelectOperation(ASTContext &Context, Identifier Id,
     auto IntTy = PredTy->getAs<BuiltinIntegerType>();
     if (!IntTy || !IntTy->isFixedWidth() || IntTy->getFixedWidth() != 1)
       return nullptr;
+    if (!isBuiltinScalarType(ValueTy) && !ValueTy->is<BuiltinVectorType>())
+      return nullptr;
   }
   Type ArgElts[] = { PredTy, ValueTy, ValueTy };
   return getBuiltinFunction(Id, ArgElts, ValueTy);
@@ -2780,7 +2788,10 @@ public:
   Type getTypeArgument(unsigned index) {
     if (index >= TypeArguments.size())
       return Type();
-    return TypeArguments[index];
+    Type type = TypeArguments[index];
+    if (!isBuiltinScalarType(type) && !type->is<BuiltinVectorType>())
+      return Type();
+    return type;
   }
 
   /// Create a pointer type.

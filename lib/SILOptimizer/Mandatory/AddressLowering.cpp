@@ -3734,9 +3734,9 @@ enum class OpaqueBuiltinKind {
 
 static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   auto kind = bi->getBuiltinKind();
-  // LLVM intrinsics. Overloaded ones accept any type named in their suffix.
+  // LLVM intrinsics only accept builtin scalars and vectors.
   if (!kind)
-    return OpaqueBuiltinKind::Unimplemented;
+    return OpaqueBuiltinKind::NeverOpaque;
 
   switch (*kind) {
   // Operate on builtin scalars and vectors, or never appear in SIL as a
@@ -3823,9 +3823,12 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::Unreachable:
   case BuiltinValueKind::UnprotectedStackAlloc:
   case BuiltinValueKind::WordAtIndex:
-  // Operands and results are builtin vectors, which are always loadable.
+  // Operands and results are builtin scalars or vectors of them.
   case BuiltinValueKind::Deinterleave:
+  case BuiltinValueKind::ExtractElement:
+  case BuiltinValueKind::InsertElement:
   case BuiltinValueKind::Interleave:
+  case BuiltinValueKind::Select:
   case BuiltinValueKind::ShuffleVector:
   // Generic or existential only within metatypes, inouts, or function types.
   case BuiltinValueKind::Alignof:
@@ -3902,10 +3905,7 @@ static OpaqueBuiltinKind classifyOpaqueBuiltin(BuiltinInst *bi) {
   case BuiltinValueKind::BuildOrdinarySerialExecutorRef:
   case BuiltinValueKind::BuildOrdinaryTaskExecutorRef:
   case BuiltinValueKind::COWBufferForReading:
-  case BuiltinValueKind::ExtractElement:
-  case BuiltinValueKind::InsertElement:
   case BuiltinValueKind::PrepareInitialization:
-  case BuiltinValueKind::Select:
   case BuiltinValueKind::TaskRunInline:
     return OpaqueBuiltinKind::Unimplemented;
 
