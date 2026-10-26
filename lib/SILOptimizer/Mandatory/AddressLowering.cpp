@@ -1115,12 +1115,10 @@ static Operand *getProjectedDefOperand(SILValue value) {
 /// is address-only, then the operand must be address-only and therefore must
 /// mapped to ValueStorage.
 ///
-/// If \p value is an unchecked_bitwise_cast or unchecked_value_cast with an
-/// address-only source operand, then return the cast operand. When the source
-/// operand is loadable, return nullptr instead: the cast result needs its own
-/// storage so the loadable source value can be stored into an
-/// unchecked_addr_cast view of that storage. The DefRewriter handles this
-/// case.
+/// If \p value is an unchecked cast with an address-only source operand, then
+/// return the cast operand. When the source operand is loadable, return nullptr
+/// instead: it has no storage to share, so the DefRewriter initializes separate
+/// storage for the cast result.
 ///
 /// open_existential_value must reuse storage because the boxed value is shared
 /// with other instances of the existential. An explicit copy is needed to
@@ -1143,7 +1141,8 @@ static Operand *getReusedStorageOperand(SILValue value) {
     return &cast<SingleValueInstruction>(value)->getOperandRef(0);
 
   case ValueKind::UncheckedValueCastInst:
-  case ValueKind::UncheckedBitwiseCastInst: {
+  case ValueKind::UncheckedBitwiseCastInst:
+  case ValueKind::UncheckedTrivialBitCastInst: {
     // Only share storage when the source is address-only. A loadable source
     // has no ValueStorage to share; the DefRewriter materializes fresh storage
     // for the cast result and stores the loadable source through an
@@ -5385,6 +5384,40 @@ protected:
     rewriteOpaqueUncheckedCastDef(uncheckedCast);
   }
 
+  // The result may be smaller than the source, so copy the result's size out
+  // of a temporary of the source type.
+  void visitUncheckedTrivialBitCastInst(UncheckedTrivialBitCastInst *cast) {
+    SILValue srcVal = cast->getOperand();
+    assert(!srcVal->getType().isAddressOnly(*pass.function) &&
+           "opaque operand should share storage via getReusedStorageOperand");
+
+    SILValue destAddr = addrMat.materializeAddress(cast);
+    auto loc = cast->getLoc();
+    auto *temp = builder.createAllocStack(loc, srcVal->getType());
+    SILValue srcAddr = temp;
+    StoreBorrowInst *storeBorrow = nullptr;
+    bool storedCopy = false;
+    if (srcVal->getType().isTrivial(*pass.function)) {
+      builder.createStore(loc, srcVal, temp, StoreOwnershipQualifier::Trivial);
+    } else if (srcVal->getOwnershipKind() == OwnershipKind::Owned ||
+               srcVal->getOwnershipKind() == OwnershipKind::Guaranteed) {
+      srcAddr = storeBorrow = builder.createStoreBorrow(loc, srcVal, temp);
+    } else {
+      builder.createStore(loc, builder.createCopyValue(loc, srcVal), temp,
+                          StoreOwnershipQualifier::Init);
+      storedCopy = true;
+    }
+    SILValue view =
+        builder.createUncheckedAddrCast(loc, srcAddr, destAddr->getType());
+    builder.createCopyAddr(loc, view, destAddr, IsNotTake, IsInitialization);
+    if (storeBorrow)
+      builder.createEndBorrow(loc, storeBorrow);
+    if (storedCopy)
+      builder.createDestroyAddr(loc, temp);
+    builder.createDeallocStack(loc, temp);
+    storage.markRewritten();
+  }
+
   void visitBeginApplyInst(BeginApplyInst *bai) {
     CallArgRewriter(bai, pass).rewriteArguments();
     ApplyRewriter(bai, pass).convertBeginApplyWithOpaqueYield();
@@ -5749,7 +5782,6 @@ protected:
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnum)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnumAddr)
   UNIMPLEMENTED_OPAQUE_RESULT(UncheckedRefCast)
-  UNIMPLEMENTED_OPAQUE_RESULT(UncheckedTrivialBitCast)
 
 #undef NO_OPAQUE_RESULT
 #undef REWRITTEN_BY_USE

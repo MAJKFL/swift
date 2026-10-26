@@ -1,0 +1,69 @@
+// RUN: %target-sil-opt -sil-print-types -address-lowering -enable-sil-opaque-values -module-name Swift -sil-verify-all %s | %FileCheck %s
+
+import Builtin
+
+sil_stage raw
+
+typealias Int = Builtin.Int64
+
+class Klass {}
+
+// The result may be smaller than the source, so it is read out of a temporary.
+// CHECK-LABEL: sil [ossa] @unchecked_trivial_bit_cast_trivial : $@convention(thin) <T where T : _Trivial> (Builtin.Int64) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : $Builtin.Int64):
+// CHECK-NEXT:    [[A:%.*]] = alloc_stack $Builtin.Int64
+// CHECK-NEXT:    store %1 to [trivial] [[A]] : $*Builtin.Int64
+// CHECK-NEXT:    [[V:%.*]] = unchecked_addr_cast [[A]] : $*Builtin.Int64 to $*T
+// CHECK-NEXT:    copy_addr [[V]] to [init] %0 : $*T
+// CHECK-NEXT:    dealloc_stack [[A]] : $*Builtin.Int64
+// CHECK-LABEL: } // end sil function 'unchecked_trivial_bit_cast_trivial'
+sil [ossa] @unchecked_trivial_bit_cast_trivial : $@convention(thin) <T where T : _Trivial> (Int) -> @out T {
+bb0(%0 : $Int):
+  %1 = unchecked_trivial_bit_cast %0 : $Int to $T
+  return %1 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @unchecked_trivial_bit_cast_guaranteed : $@convention(thin) <T where T : _Trivial> (@guaranteed Klass) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : @guaranteed $Klass):
+// CHECK-NEXT:    [[A:%.*]] = alloc_stack $Klass
+// CHECK-NEXT:    [[B:%.*]] = store_borrow %1 to [[A]] : $*Klass
+// CHECK-NEXT:    [[V:%.*]] = unchecked_addr_cast [[B]] : $*Klass to $*T
+// CHECK-NEXT:    copy_addr [[V]] to [init] %0 : $*T
+// CHECK-NEXT:    end_borrow [[B]] : $*Klass
+// CHECK-NEXT:    dealloc_stack [[A]] : $*Klass
+// CHECK-LABEL: } // end sil function 'unchecked_trivial_bit_cast_guaranteed'
+sil [ossa] @unchecked_trivial_bit_cast_guaranteed : $@convention(thin) <T where T : _Trivial> (@guaranteed Klass) -> @out T {
+bb0(%0 : @guaranteed $Klass):
+  %1 = unchecked_trivial_bit_cast %0 : $Klass to $T
+  return %1 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @unchecked_trivial_bit_cast_unowned : $@convention(thin) <T where T : _Trivial> (@guaranteed Klass) -> @out T {
+// CHECK:         [[U:%.*]] = unchecked_bitwise_cast %1 : $Klass to $Klass
+// CHECK-NEXT:    [[A:%.*]] = alloc_stack $Klass
+// CHECK-NEXT:    [[C:%.*]] = copy_value [[U]] : $Klass
+// CHECK-NEXT:    store [[C]] to [init] [[A]] : $*Klass
+// CHECK-NEXT:    [[V:%.*]] = unchecked_addr_cast [[A]] : $*Klass to $*T
+// CHECK-NEXT:    copy_addr [[V]] to [init] %0 : $*T
+// CHECK-NEXT:    destroy_addr [[A]] : $*Klass
+// CHECK-NEXT:    dealloc_stack [[A]] : $*Klass
+// CHECK-LABEL: } // end sil function 'unchecked_trivial_bit_cast_unowned'
+sil [ossa] @unchecked_trivial_bit_cast_unowned : $@convention(thin) <T where T : _Trivial> (@guaranteed Klass) -> @out T {
+bb0(%0 : @guaranteed $Klass):
+  %1 = unchecked_bitwise_cast %0 : $Klass to $Klass
+  %2 = unchecked_trivial_bit_cast %1 : $Klass to $T
+  return %2 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @unchecked_trivial_bit_cast_opaque : $@convention(thin) <T, U where U : _Trivial> (@in_guaranteed T) -> (@out U, @out U) {
+// CHECK:       bb0(%0 : $*U, %1 : $*U, %2 : $*T):
+// CHECK-NEXT:    [[V:%.*]] = unchecked_addr_cast %2 : $*T to $*U
+// CHECK-NEXT:    copy_addr [[V]] to [init] %0 : $*U
+// CHECK-NEXT:    copy_addr [[V]] to [init] %1 : $*U
+// CHECK-LABEL: } // end sil function 'unchecked_trivial_bit_cast_opaque'
+sil [ossa] @unchecked_trivial_bit_cast_opaque : $@convention(thin) <T, U where U : _Trivial> (@in_guaranteed T) -> (@out U, @out U) {
+bb0(%0 : @guaranteed $T):
+  %1 = unchecked_trivial_bit_cast %0 : $T to $U
+  %2 = tuple (%1 : $U, %1 : $U)
+  return %2 : $(U, U)
+}
