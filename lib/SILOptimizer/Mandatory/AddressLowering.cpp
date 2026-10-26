@@ -4403,6 +4403,10 @@ protected:
   void emitExtract(SingleValueInstruction *extractInst);
 
   void visitSelectEnumInst(SelectEnumInst *sei) {
+    // DefRewriter rewrites an opaque result, reading every operand's storage.
+    if (pass.valueStorageMap.contains(sei))
+      return;
+
     SmallVector<std::pair<EnumElementDecl *, SILValue>> caseValues;
     for (unsigned index = 0, count = sei->getNumCases(); index < count;
          ++index) {
@@ -4416,6 +4420,9 @@ protected:
     sei->replaceAllUsesWith(addr);
     pass.deleter.forceDelete(sei);
   }
+
+  // DefRewriter rewrites the opaque result, reading every operand's storage.
+  void visitSelectEnumAddrInst(SelectEnumAddrInst *) {}
 
   void visitStrongCopyUnownedValueInst(StrongCopyUnownedValueInst *scuvi) {
     assert(!scuvi->getType().isAddressOnly(*pass.function) &&
@@ -4752,7 +4759,6 @@ protected:
 
   UNIMPLEMENTED_OPAQUE_OPERAND(BorrowedFrom)
   UNIMPLEMENTED_OPAQUE_OPERAND(DropDeinit)
-  UNIMPLEMENTED_OPAQUE_OPERAND(SelectEnumAddr)
 
 #undef NO_OPAQUE_OPERAND
 #undef UNIMPLEMENTED_OPAQUE_OPERAND
@@ -5515,6 +5521,52 @@ protected:
     pass.valueStorageMap.setStorageAddress(dbi, addr);
   }
 
+  void visitSelectEnumInst(SelectEnumInst *sei) {
+    SILValue enumOperand = sei->getEnumOperand();
+    if (pass.valueStorageMap.contains(enumOperand))
+      enumOperand = addrMat.materializeAddress(enumOperand);
+    rewriteOpaqueSelect(sei, enumOperand);
+  }
+
+  void visitSelectEnumAddrInst(SelectEnumAddrInst *seai) {
+    rewriteOpaqueSelect(seai, seai->getEnumOperand());
+  }
+
+  // Select the address of a case value. The result type is trivial, so the
+  // values not selected need no destroy.
+  void rewriteOpaqueSelect(SelectEnumOperation select, SILValue enumOperand) {
+    auto loc = select->getLoc();
+    SILType pointerType =
+        SILType::getRawPointerType(pass.getModule()->getASTContext());
+    auto pointerTo = [&](SILValue value) -> SILValue {
+      return builder.createAddressToPointer(
+          loc, addrMat.materializeAddress(value), pointerType,
+          /*needsStackProtection*/ false);
+    };
+    SmallVector<std::pair<EnumElementDecl *, SILValue>, 4> casePointers;
+    for (unsigned index = 0, count = select.getNumCases(); index < count;
+         ++index) {
+      auto [element, value] = select.getCase(index);
+      casePointers.push_back({element, pointerTo(value)});
+    }
+    SILValue defaultPointer;
+    if (select.hasDefault())
+      defaultPointer = pointerTo(select.getDefaultResult());
+
+    SILValue selected;
+    if (enumOperand->getType().isAddress())
+      selected = builder.createSelectEnumAddr(loc, enumOperand, pointerType,
+                                              defaultPointer, casePointers);
+    else
+      selected = builder.createSelectEnum(loc, enumOperand, pointerType,
+                                          defaultPointer, casePointers);
+    SILValue destAddr = addrMat.materializeAddress(select.operator->());
+    SILValue srcAddr = builder.createPointerToAddress(
+        loc, selected, destAddr->getType(), /*isStrict*/ true);
+    builder.createCopyAddr(loc, srcAddr, destAddr, IsNotTake, IsInitialization);
+    storage.markRewritten();
+  }
+
   void visitMakeAddrBorrowInst(MakeAddrBorrowInst *mabi) {
     SILValue destAddr = addrMat.materializeAddress(mabi);
     builder.createInitBorrowAddr(mabi->getLoc(), destAddr, mabi->getOperand());
@@ -5812,8 +5864,6 @@ protected:
 
   UNIMPLEMENTED_OPAQUE_RESULT(DropDeinit)
   UNIMPLEMENTED_OPAQUE_RESULT(EndApply)
-  UNIMPLEMENTED_OPAQUE_RESULT(SelectEnum)
-  UNIMPLEMENTED_OPAQUE_RESULT(SelectEnumAddr)
 
 #undef NO_OPAQUE_RESULT
 #undef REWRITTEN_BY_USE

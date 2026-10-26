@@ -1,0 +1,54 @@
+// RUN: %target-sil-opt -sil-print-types -address-lowering -enable-sil-opaque-values -module-name Swift -sil-verify-all %s | %FileCheck %s
+
+import Builtin
+
+sil_stage raw
+
+typealias Int = Builtin.Int64
+
+enum E<T> {
+  case a(T)
+  case b
+}
+
+// CHECK-LABEL: sil [ossa] @select_enum_opaque_result : $@convention(thin) <T where T : _Trivial> (E<Builtin.Int64>, @in T, @in T) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : $E<Builtin.Int64>, %2 : $*T, %3 : $*T):
+// CHECK-NEXT:    [[PA:%.*]] = address_to_pointer %2 : $*T to $Builtin.RawPointer
+// CHECK-NEXT:    [[PB:%.*]] = address_to_pointer %3 : $*T to $Builtin.RawPointer
+// CHECK-NEXT:    [[S:%.*]] = select_enum %1 : $E<Builtin.Int64>, case #E.a!enumelt: [[PA]], default [[PB]] : $Builtin.RawPointer
+// CHECK-NEXT:    [[A:%.*]] = pointer_to_address [[S]] : $Builtin.RawPointer to [strict] $*T
+// CHECK-NEXT:    copy_addr [[A]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'select_enum_opaque_result'
+sil [ossa] @select_enum_opaque_result : $@convention(thin) <T where T : _Trivial> (E<Int>, @in T, @in T) -> @out T {
+bb0(%0 : $E<Int>, %1 : $T, %2 : $T):
+  %3 = select_enum %0 : $E<Int>, case #E.a!enumelt: %1, default %2 : $T
+  return %3 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @select_enum_opaque_enum_and_result : $@convention(thin) <T where T : _Trivial> (@in_guaranteed E<T>, @in T, @in T) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : $*E<T>, %2 : $*T, %3 : $*T):
+// CHECK-NEXT:    [[PA:%.*]] = address_to_pointer %2 : $*T to $Builtin.RawPointer
+// CHECK-NEXT:    [[PB:%.*]] = address_to_pointer %3 : $*T to $Builtin.RawPointer
+// CHECK-NEXT:    [[S:%.*]] = select_enum_addr %1 : $*E<T>, case #E.a!enumelt: [[PA]], case #E.b!enumelt: [[PB]] : $Builtin.RawPointer
+// CHECK-NEXT:    [[A:%.*]] = pointer_to_address [[S]] : $Builtin.RawPointer to [strict] $*T
+// CHECK-NEXT:    copy_addr [[A]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'select_enum_opaque_enum_and_result'
+sil [ossa] @select_enum_opaque_enum_and_result : $@convention(thin) <T where T : _Trivial> (@in_guaranteed E<T>, @in T, @in T) -> @out T {
+bb0(%0 : $E<T>, %1 : $T, %2 : $T):
+  %3 = select_enum %0 : $E<T>, case #E.a!enumelt: %1, case #E.b!enumelt: %2 : $T
+  return %3 : $T
+}
+
+// CHECK-LABEL: sil [ossa] @select_enum_addr_opaque_result : $@convention(thin) <T where T : _Trivial> (@inout E<Builtin.Int64>, @in T, @in T) -> @out T {
+// CHECK:       bb0(%0 : $*T, %1 : $*E<Builtin.Int64>, %2 : $*T, %3 : $*T):
+// CHECK-NEXT:    [[PA:%.*]] = address_to_pointer %2 : $*T to $Builtin.RawPointer
+// CHECK-NEXT:    [[PB:%.*]] = address_to_pointer %3 : $*T to $Builtin.RawPointer
+// CHECK-NEXT:    [[S:%.*]] = select_enum_addr %1 : $*E<Builtin.Int64>, case #E.a!enumelt: [[PA]], default [[PB]] : $Builtin.RawPointer
+// CHECK-NEXT:    [[A:%.*]] = pointer_to_address [[S]] : $Builtin.RawPointer to [strict] $*T
+// CHECK-NEXT:    copy_addr [[A]] to [init] %0 : $*T
+// CHECK-LABEL: } // end sil function 'select_enum_addr_opaque_result'
+sil [ossa] @select_enum_addr_opaque_result : $@convention(thin) <T where T : _Trivial> (@inout E<Int>, @in T, @in T) -> @out T {
+bb0(%0 : $*E<Int>, %1 : $T, %2 : $T):
+  %3 = select_enum_addr %0 : $*E<Int>, case #E.a!enumelt: %1, default %2 : $T
+  return %3 : $T
+}
