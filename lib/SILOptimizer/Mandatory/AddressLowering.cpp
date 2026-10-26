@@ -3850,8 +3850,6 @@ enum class OpaqueBuiltinKind {
   AddressOfBorrow,
   UnprotectedAddressOfBorrow,
   ZeroInitializer,
-  /// May use or define an opaque value, but has no rewrite yet.
-  Unimplemented,
 };
 } // end anonymous namespace
 
@@ -4106,11 +4104,6 @@ protected:
     llvm::report_fatal_error("^^^ Unexpected opaque value use.");
   }
 
-  void unimplementedOpaqueUse(SILInstruction *inst) {
-    inst->dump();
-    llvm::report_fatal_error("^^^ Unimplemented opaque value use.");
-  }
-
   // Opaque call argument.
   void visitApplyInst(ApplyInst *applyInst) {
     CallArgRewriter(applyInst, pass).rewriteIndirectArgument(use);
@@ -4197,8 +4190,6 @@ protected:
     case OpaqueBuiltinKind::IndirectResult:
     case OpaqueBuiltinKind::ZeroInitializer:
       return unexpectedOpaqueUse(bi);
-    case OpaqueBuiltinKind::Unimplemented:
-      return unimplementedOpaqueUse(bi);
     }
   }
 
@@ -4683,8 +4674,6 @@ protected:
 
 #define NO_OPAQUE_OPERAND(INST)                                                \
   void visit##INST##Inst(INST##Inst *inst) { unexpectedOpaqueUse(inst); }
-#define UNIMPLEMENTED_OPAQUE_OPERAND(INST)                                     \
-  void visit##INST##Inst(INST##Inst *inst) { unimplementedOpaqueUse(inst); }
 
   // Value operands are addresses, indices, or on-stack closures.
   NO_OPAQUE_OPERAND(AddressToPointer)
@@ -4877,7 +4866,6 @@ protected:
   NO_OPAQUE_OPERAND(BeginDeallocRef)
 
 #undef NO_OPAQUE_OPERAND
-#undef UNIMPLEMENTED_OPAQUE_OPERAND
 };
 } // end anonymous namespace
 
@@ -5473,11 +5461,6 @@ protected:
         "^^^ Opaque value def should have been rewritten with its operand.");
   }
 
-  void unimplementedOpaqueDef(SILInstruction *inst) {
-    inst->dump();
-    llvm::report_fatal_error("^^^ Unimplemented opaque value def.");
-  }
-
   void visitApplyInst(ApplyInst *applyInst) {
     // Completely rewrite the apply instruction, handling any remaining
     // (loadable) indirect parameters, allocating memory for indirect
@@ -5645,8 +5628,6 @@ protected:
     case OpaqueBuiltinKind::AddressOfBorrow:
     case OpaqueBuiltinKind::UnprotectedAddressOfBorrow:
       return unexpectedOpaqueDef(bi);
-    case OpaqueBuiltinKind::Unimplemented:
-      return unimplementedOpaqueDef(bi);
     }
   }
 
@@ -5834,8 +5815,6 @@ protected:
   void visit##INST##Inst(INST##Inst *inst) { unexpectedOpaqueDef(inst); }
 #define REWRITTEN_BY_USE(INST)                                                 \
   void visit##INST##Inst(INST##Inst *inst) { opaqueDefNotRewrittenByUse(inst); }
-#define UNIMPLEMENTED_OPAQUE_RESULT(INST)                                      \
-  void visit##INST##Inst(INST##Inst *inst) { unimplementedOpaqueDef(inst); }
 
   // No results. Terminator results are block arguments, see rewriteArg.
 #define INST(ID, PARENT)
@@ -6003,7 +5982,6 @@ protected:
 
 #undef NO_OPAQUE_RESULT
 #undef REWRITTEN_BY_USE
-#undef UNIMPLEMENTED_OPAQUE_RESULT
 };
 } // end anonymous namespace
 
