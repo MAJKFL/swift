@@ -1142,6 +1142,7 @@ static Operand *getReusedStorageOperand(SILValue value) {
 
   case ValueKind::UncheckedValueCastInst:
   case ValueKind::UncheckedBitwiseCastInst:
+  case ValueKind::UncheckedRefCastInst:
   case ValueKind::UncheckedTrivialBitCastInst: {
     // Only share storage when the source is address-only. A loadable source
     // has no ValueStorage to share; the DefRewriter materializes fresh storage
@@ -1233,7 +1234,7 @@ static SILValue getProjectedUseValue(Operand *operand) {
 /// own storage holds a bitwise copy of the operand that nothing destroys.
 static bool isGuaranteedCastOfLoadable(SILValue value) {
   if (value->getOwnershipKind() != OwnershipKind::Guaranteed ||
-      !isa<UncheckedValueCastInst>(value))
+      !(isa<UncheckedValueCastInst>(value) || isa<UncheckedRefCastInst>(value)))
     return false;
   auto *castInst = cast<SingleValueInstruction>(value);
   return !castInst->getOperand(0)->getType().isAddressOnly(
@@ -4521,6 +4522,14 @@ protected:
     rewriteOpaqueUncheckedCastUse(uncheckedCastInst);
   }
 
+  void visitUncheckedRefCastInst(UncheckedRefCastInst *uncheckedCastInst) {
+    rewriteOpaqueUncheckedCastUse(uncheckedCastInst);
+  }
+
+  void visitRefToRawPointerInst(RefToRawPointerInst *refToRawPointer) {
+    rewriteOpaqueUncheckedCastUse(refToRawPointer);
+  }
+
   void visitUncheckedTrivialBitCastInst(
       UncheckedTrivialBitCastInst *uncheckedCastInst) {
     rewriteOpaqueUncheckedCastUse(uncheckedCastInst);
@@ -4743,9 +4752,7 @@ protected:
 
   UNIMPLEMENTED_OPAQUE_OPERAND(BorrowedFrom)
   UNIMPLEMENTED_OPAQUE_OPERAND(DropDeinit)
-  UNIMPLEMENTED_OPAQUE_OPERAND(RefToRawPointer)
   UNIMPLEMENTED_OPAQUE_OPERAND(SelectEnumAddr)
-  UNIMPLEMENTED_OPAQUE_OPERAND(UncheckedRefCast)
 
 #undef NO_OPAQUE_OPERAND
 #undef UNIMPLEMENTED_OPAQUE_OPERAND
@@ -5384,6 +5391,10 @@ protected:
     rewriteOpaqueUncheckedCastDef(uncheckedCast);
   }
 
+  void visitUncheckedRefCastInst(UncheckedRefCastInst *uncheckedCast) {
+    rewriteOpaqueUncheckedCastDef(uncheckedCast);
+  }
+
   // The result may be smaller than the source, so copy the result's size out
   // of a temporary of the source type.
   void visitUncheckedTrivialBitCastInst(UncheckedTrivialBitCastInst *cast) {
@@ -5415,6 +5426,29 @@ protected:
     if (storedCopy)
       builder.createDestroyAddr(loc, temp);
     builder.createDeallocStack(loc, temp);
+    storage.markRewritten();
+  }
+
+  void visitRawPointerToRefInst(RawPointerToRefInst *rawPointerToRef) {
+    SILValue destAddr = addrMat.materializeAddress(rawPointerToRef);
+    auto loc = rawPointerToRef->getLoc();
+    SILValue pointer = rawPointerToRef->getOperand();
+    SILType pointerAddrType = pointer->getType().getAddressType();
+    if (rawPointerToRef->isImmortal()) {
+      // Nothing destroys an immortal result, so its storage must not be
+      // tracked by MemoryLifetimeVerifier either.
+      SILValue view =
+          builder.createUncheckedAddrCast(loc, destAddr, pointerAddrType);
+      builder.createStore(loc, pointer, view, StoreOwnershipQualifier::Trivial);
+    } else {
+      // Copying through the result type's value witness retains the +1 result.
+      auto *temp = builder.createAllocStack(loc, pointer->getType());
+      builder.createStore(loc, pointer, temp, StoreOwnershipQualifier::Trivial);
+      SILValue view =
+          builder.createUncheckedAddrCast(loc, temp, destAddr->getType());
+      builder.createCopyAddr(loc, view, destAddr, IsNotTake, IsInitialization);
+      builder.createDeallocStack(loc, temp);
+    }
     storage.markRewritten();
   }
 
@@ -5778,10 +5812,8 @@ protected:
 
   UNIMPLEMENTED_OPAQUE_RESULT(DropDeinit)
   UNIMPLEMENTED_OPAQUE_RESULT(EndApply)
-  UNIMPLEMENTED_OPAQUE_RESULT(RawPointerToRef)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnum)
   UNIMPLEMENTED_OPAQUE_RESULT(SelectEnumAddr)
-  UNIMPLEMENTED_OPAQUE_RESULT(UncheckedRefCast)
 
 #undef NO_OPAQUE_RESULT
 #undef REWRITTEN_BY_USE
